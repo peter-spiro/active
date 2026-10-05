@@ -122,7 +122,7 @@ export async function openBranchDiff(file: vscode.Uri): Promise<void> {
     }
     const base = await readBaseBytes(
       place.repo,
-      place.mergeBase,
+      place.forkPoint,
       place.baseRelative,
     );
     if (base?.includes(0)) {
@@ -134,7 +134,7 @@ export async function openBranchDiff(file: vscode.Uri): Promise<void> {
     const title = `${name} (main base ↔ working folder)`;
     const left = diffUri(file, {
       repo: place.repo,
-      ref: place.mergeBase,
+      ref: place.forkPoint,
       relative: place.baseRelative,
       empty: !base,
     });
@@ -194,15 +194,13 @@ async function changesInFolder(
   }
   const topLevel = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
   const baseRef = await resolveBaseRef(topLevel);
-  const mergeBase = (
-    await git(topLevel, ["merge-base", "HEAD", baseRef])
-  ).trim();
+  const forkPoint = await resolveForkPoint(topLevel, baseRef);
   const diff = await git(topLevel, [
     "diff",
     "--name-status",
     "--find-renames",
     "-z",
-    mergeBase,
+    forkPoint,
     "--",
     cwd,
   ]);
@@ -267,6 +265,56 @@ async function resolveBaseRef(cwd: string): Promise<string> {
     }
   }
   throw new Error("Could not find a main branch.");
+}
+
+// merge-base(HEAD, main) follows main forward after main is merged into the
+// branch. The fork point is the main commit this branch originally left:
+// the parent, on main, of the earliest first-parent commit not in main.
+async function resolveForkPoint(cwd: string, baseRef: string): Promise<string> {
+  const mergeBase = (await git(cwd, ["merge-base", "HEAD", baseRef])).trim();
+  let oldest = "";
+  try {
+    const listing = await git(cwd, [
+      "rev-list",
+      "--first-parent",
+      "--reverse",
+      `${baseRef}..HEAD`,
+    ]);
+    oldest = listing.split("\n").find((line) => line.length > 0) ?? "";
+  } catch {
+    return mergeBase;
+  }
+  if (!oldest) {
+    return mergeBase;
+  }
+  let parents: string[] = [];
+  try {
+    const line = (
+      await git(cwd, ["rev-list", "--parents", "-n", "1", oldest])
+    ).trim();
+    parents = line.split(/\s+/).slice(1);
+  } catch {
+    return mergeBase;
+  }
+  for (const parent of parents) {
+    if (await isAncestor(cwd, parent, baseRef)) {
+      return parent;
+    }
+  }
+  return mergeBase;
+}
+
+async function isAncestor(
+  cwd: string,
+  commit: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await git(cwd, ["merge-base", "--is-ancestor", commit, ref]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function refExists(cwd: string, ref: string): Promise<boolean> {
@@ -370,7 +418,7 @@ function existingPath(value: string): string {
 async function locateBranchFile(file: vscode.Uri): Promise<{
   repo: string;
   baseRelative: string;
-  mergeBase: string;
+  forkPoint: string;
 }> {
   const dir = path.dirname(file.fsPath);
   if (!(await isRepo(dir))) {
@@ -378,14 +426,14 @@ async function locateBranchFile(file: vscode.Uri): Promise<{
   }
   const repo = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
   const baseRef = await resolveBaseRef(repo);
-  const mergeBase = (await git(repo, ["merge-base", "HEAD", baseRef])).trim();
+  const forkPoint = await resolveForkPoint(repo, baseRef);
   const relative = gitRelative(repo, file.fsPath);
   const listed = await git(repo, [
     "diff",
     "--name-status",
     "--find-renames",
     "-z",
-    mergeBase,
+    forkPoint,
     "--",
     file.fsPath,
   ]);
@@ -394,7 +442,7 @@ async function locateBranchFile(file: vscode.Uri): Promise<{
   );
   return {
     repo,
-    mergeBase,
+    forkPoint,
     baseRelative: match?.previous ?? relative,
   };
 }
