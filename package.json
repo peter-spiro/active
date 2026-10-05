@@ -1,0 +1,204 @@
+{
+  "name": "active",
+  "displayName": "Active",
+  "description": "Shows files you have edited in an Explorer section called Active.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "activeFiles",
+          "name": "Active",
+          "contextualTitle": "Active Files",
+          "icon": "$(history)",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "activeFiles.selectMode",
+        "title": "Select Mode",
+        "category": "Active",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "activeFiles.showTree",
+        "title": "Show as Tree",
+        "category": "Active",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "activeFiles.showList",
+        "title": "Show as List",
+        "category": "Active",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "activeFiles.showActive",
+        "title": "Active",
+        "category": "Active",
+        "icon": "$(history)"
+      },
+      {
+        "command": "activeFiles.showBranch",
+        "title": "Branch - Open",
+        "category": "Active",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "activeFiles.showBranchDiff",
+        "title": "Branch - Diff",
+        "category": "Active",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "activeFiles.openDiff",
+        "title": "Open Diff",
+        "category": "Active",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "activeFiles.openFile",
+        "title": "Open File",
+        "category": "Active"
+      },
+      {
+        "command": "activeFiles.refresh",
+        "title": "Refresh",
+        "category": "Active",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "activeFiles.clear",
+        "title": "Clear List",
+        "category": "Active",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "activeFiles.remove",
+        "title": "Remove from Active",
+        "icon": "$(close)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "activeFiles.selectMode",
+          "when": "view == activeFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "activeFiles.showTree",
+          "when": "view == activeFiles && activeFilesLayout == list",
+          "group": "navigation@2"
+        },
+        {
+          "command": "activeFiles.showList",
+          "when": "view == activeFiles && activeFilesLayout == tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "activeFiles.refresh",
+          "when": "view == activeFiles",
+          "group": "navigation@3"
+        },
+        {
+          "command": "activeFiles.clear",
+          "when": "view == activeFiles && !activeFilesBranch",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "activeFiles.remove",
+          "when": "view == activeFiles && viewItem == activeFile",
+          "group": "inline"
+        },
+        {
+          "command": "activeFiles.remove",
+          "when": "view == activeFiles && viewItem == activeFile",
+          "group": "navigation"
+        },
+        {
+          "command": "activeFiles.openFile",
+          "when": "view == activeFiles && viewItem == branchFile && activeFilesContentMode == branchDiff",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "activeFiles.showTree",
+          "when": "activeFilesLayout != tree"
+        },
+        {
+          "command": "activeFiles.showList",
+          "when": "activeFilesLayout != list"
+        },
+        {
+          "command": "activeFiles.showActive",
+          "when": "activeFilesContentMode != active"
+        },
+        {
+          "command": "activeFiles.showBranch",
+          "when": "activeFilesContentMode != branchOpen"
+        },
+        {
+          "command": "activeFiles.showBranchDiff",
+          "when": "activeFilesContentMode != branchDiff"
+        },
+        {
+          "command": "activeFiles.clear",
+          "when": "!activeFilesBranch"
+        },
+        {
+          "command": "activeFiles.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "activeFiles.openFile",
+          "when": "false"
+        },
+        {
+          "command": "activeFiles.remove",
+          "when": "false"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "activeFiles",
+        "when": "!activeFilesBranch",
+        "contents": "Edit a file and it will show up here."
+      },
+      {
+        "view": "activeFiles",
+        "when": "activeFilesBranch",
+        "contents": "No files have changed since this branch left main."
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "install-cursor": "npm run compile && node scripts/install-cursor.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.4"
+  }
+}

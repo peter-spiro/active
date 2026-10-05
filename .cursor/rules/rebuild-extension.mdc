@@ -1,0 +1,16 @@
+---
+description: Rebuild and install the Active extension after code changes
+alwaysApply: true
+---
+
+# Rebuild after changes
+
+After changing this extension, rebuild and install it before finishing:
+
+```bash
+npm run install-cursor
+```
+
+Run that from the repo root. It compiles TypeScript and copies the extension to `~/.cursor/extensions/local.active-0.1.0`. Tell the user to reload Cursor when the install finishes.
+
+Do this after every change that affects the extension, including source, `package.json`, and other files the install script copies. Skip it when the only edit is this rule or another file the extension does not load.
