@@ -17,24 +17,70 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "search2View",
+          "title": "Search-2",
+          "icon": "media/search.svg"
+        }
+      ]
+    },
     "views": {
+      "search2View": [
+        {
+          "id": "search2",
+          "name": "Search-2",
+          "type": "webview",
+          "contextualTitle": "Search-2",
+          "icon": "$(search)",
+          "visibility": "visible"
+        }
+      ],
       "explorer": [
         {
+          "id": "stackLevels",
+          "name": "Stack",
+          "type": "webview",
+          "contextualTitle": "Stack",
+          "icon": "$(layers)",
+          "visibility": "visible"
+        },
+        {
+          "id": "localBranches",
+          "name": "Branches",
+          "type": "webview",
+          "contextualTitle": "Branches",
+          "icon": "$(git-branch)",
+          "visibility": "visible"
+        },
+        {
+          "id": "diffFiles",
+          "name": "Diffs",
+          "type": "webview",
+          "contextualTitle": "Diffs",
+          "icon": "$(diff)",
+          "visibility": "visible"
+        },
+        {
           "id": "activeFiles",
-          "name": "Active",
-          "contextualTitle": "Active Files",
+          "name": "Recent",
+          "type": "webview",
+          "contextualTitle": "Recent",
           "icon": "$(history)",
+          "visibility": "visible"
+        },
+        {
+          "id": "favoriteFiles",
+          "name": "Favorites",
+          "type": "webview",
+          "contextualTitle": "Favorites",
+          "icon": "$(star-full)",
           "visibility": "visible"
         }
       ]
     },
     "commands": [
-      {
-        "command": "activeFiles.selectMode",
-        "title": "Select Mode",
-        "category": "Active",
-        "icon": "$(list-selection)"
-      },
       {
         "command": "activeFiles.showTree",
         "title": "Show as Tree",
@@ -48,22 +94,70 @@
         "icon": "$(list-flat)"
       },
       {
-        "command": "activeFiles.showActive",
-        "title": "Active",
+        "command": "diffs.showTree",
+        "title": "Show as Tree",
         "category": "Active",
-        "icon": "$(history)"
+        "icon": "$(list-tree)"
       },
       {
-        "command": "activeFiles.showBranch",
-        "title": "Branch - Open",
+        "command": "diffs.showList",
+        "title": "Show as List",
         "category": "Active",
-        "icon": "$(git-branch)"
+        "icon": "$(list-flat)"
       },
       {
-        "command": "activeFiles.showBranchDiff",
-        "title": "Branch - Diff",
+        "command": "diffs.refresh",
+        "title": "Refresh",
         "category": "Active",
-        "icon": "$(diff)"
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "diffs.collapseAll",
+        "title": "Collapse All",
+        "category": "Active",
+        "icon": "$(collapse-all)"
+      },
+      {
+        "command": "diffs.levelOn",
+        "title": "Level diff",
+        "category": "Active",
+        "icon": {
+          "light": "media/diff-level-on-light.svg",
+          "dark": "media/diff-level-on-dark.svg"
+        }
+      },
+      {
+        "command": "diffs.levelOff",
+        "title": "Level diff",
+        "category": "Active",
+        "icon": {
+          "light": "media/diff-level-off-light.svg",
+          "dark": "media/diff-level-off-dark.svg"
+        }
+      },
+      {
+        "command": "diffs.mainOn",
+        "title": "Main diff",
+        "category": "Active",
+        "icon": {
+          "light": "media/diff-main-on-light.svg",
+          "dark": "media/diff-main-on-dark.svg"
+        }
+      },
+      {
+        "command": "diffs.mainOff",
+        "title": "Main diff",
+        "category": "Active",
+        "icon": {
+          "light": "media/diff-main-off-light.svg",
+          "dark": "media/diff-main-off-dark.svg"
+        }
+      },
+      {
+        "command": "diffs.pickCommit",
+        "title": "Diff from commit",
+        "category": "Active",
+        "icon": "$(git-commit)"
       },
       {
         "command": "activeFiles.openDiff",
@@ -83,6 +177,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "activeFiles.collapseAll",
+        "title": "Collapse All",
+        "category": "Active",
+        "icon": "$(collapse-all)"
+      },
+      {
         "command": "activeFiles.clear",
         "title": "Clear List",
         "category": "Active",
@@ -90,24 +190,158 @@
       },
       {
         "command": "activeFiles.remove",
-        "title": "Remove from Active",
+        "title": "Remove from Recent",
         "icon": "$(close)"
+      },
+      {
+        "command": "favorites.addOpen",
+        "title": "Add to Favorites",
+        "category": "Active",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "favorites.removeOpen",
+        "title": "Remove from Favorites",
+        "category": "Active",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "favorites.addFolder",
+        "title": "Add to Favorites",
+        "category": "Active",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "favorites.pickFolder",
+        "title": "Add Folder",
+        "category": "Active",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "stack.add",
+        "title": "New Branch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "stack.unstack",
+        "title": "Unstack",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "stack.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "branches.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "branches.pare",
+        "title": "Pare",
+        "icon": {
+          "light": "media/pare-light.svg",
+          "dark": "media/pare-dark.svg"
+        }
+      },
+      {
+        "command": "search2.refresh",
+        "title": "Refresh",
+        "category": "Active",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "search2.show",
+        "title": "Search-2",
+        "category": "Active",
+        "icon": "$(search)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "activeFiles.selectMode",
-          "when": "view == activeFiles",
+          "command": "stack.add",
+          "when": "view == stackLevels",
           "group": "navigation@1"
+        },
+        {
+          "command": "stack.unstack",
+          "when": "view == stackLevels",
+          "group": "navigation@2"
+        },
+        {
+          "command": "stack.refresh",
+          "when": "view == stackLevels",
+          "group": "navigation@3"
+        },
+        {
+          "command": "branches.pare",
+          "when": "view == localBranches",
+          "group": "navigation@1"
+        },
+        {
+          "command": "branches.refresh",
+          "when": "view == localBranches",
+          "group": "navigation@2"
+        },
+        {
+          "command": "diffs.levelOn",
+          "when": "view == diffFiles && diffs.hasStackParent && diffs.base == parent",
+          "group": "navigation@0"
+        },
+        {
+          "command": "diffs.levelOff",
+          "when": "view == diffFiles && diffs.hasStackParent && diffs.base == main",
+          "group": "navigation@0"
+        },
+        {
+          "command": "diffs.mainOn",
+          "when": "view == diffFiles && diffs.hasStackParent && diffs.base == main",
+          "group": "navigation@1"
+        },
+        {
+          "command": "diffs.mainOff",
+          "when": "view == diffFiles && diffs.hasStackParent && diffs.base == parent",
+          "group": "navigation@1"
+        },
+        {
+          "command": "diffs.pickCommit",
+          "when": "view == diffFiles",
+          "group": "navigation@2"
+        },
+        {
+          "command": "diffs.showTree",
+          "when": "view == diffFiles && diffsLayout == list",
+          "group": "navigation@3"
+        },
+        {
+          "command": "diffs.showList",
+          "when": "view == diffFiles && diffsLayout == tree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "diffs.refresh",
+          "when": "view == diffFiles",
+          "group": "navigation@4"
+        },
+        {
+          "command": "diffs.collapseAll",
+          "when": "view == diffFiles && diffsLayout == tree",
+          "group": "navigation@5"
         },
         {
           "command": "activeFiles.showTree",
           "when": "view == activeFiles && activeFilesLayout == list",
-          "group": "navigation@2"
+          "group": "navigation@1"
         },
         {
           "command": "activeFiles.showList",
+          "when": "view == activeFiles && activeFilesLayout == tree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "activeFiles.collapseAll",
           "when": "view == activeFiles && activeFilesLayout == tree",
           "group": "navigation@2"
         },
@@ -118,8 +352,42 @@
         },
         {
           "command": "activeFiles.clear",
-          "when": "view == activeFiles && !activeFilesBranch",
+          "when": "view == activeFiles",
           "group": "navigation@4"
+        },
+        {
+          "command": "favorites.addOpen",
+          "when": "view == favoriteFiles && favorites.canAdd",
+          "group": "navigation"
+        },
+        {
+          "command": "favorites.pickFolder",
+          "when": "view == favoriteFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "search2.refresh",
+          "when": "view == search2",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "favorites.addFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "favorites.addOpen",
+          "when": "!favorites.active && (resourceScheme == file || resourceScheme == vscode-remote || resourceScheme == vscode-vfs)",
+          "group": "navigation"
+        },
+        {
+          "command": "favorites.removeOpen",
+          "when": "favorites.active && (resourceScheme == file || resourceScheme == vscode-remote || resourceScheme == vscode-vfs)",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -131,11 +399,6 @@
         {
           "command": "activeFiles.remove",
           "when": "view == activeFiles && viewItem == activeFile",
-          "group": "navigation"
-        },
-        {
-          "command": "activeFiles.openFile",
-          "when": "view == activeFiles && viewItem == branchFile && activeFilesContentMode == branchDiff",
           "group": "navigation"
         }
       ],
@@ -149,20 +412,40 @@
           "when": "activeFilesLayout != list"
         },
         {
-          "command": "activeFiles.showActive",
-          "when": "activeFilesContentMode != active"
+          "command": "diffs.showTree",
+          "when": "diffsLayout != tree"
         },
         {
-          "command": "activeFiles.showBranch",
-          "when": "activeFilesContentMode != branchOpen"
+          "command": "diffs.showList",
+          "when": "diffsLayout != list"
         },
         {
-          "command": "activeFiles.showBranchDiff",
-          "when": "activeFilesContentMode != branchDiff"
+          "command": "diffs.refresh",
+          "when": "false"
         },
         {
-          "command": "activeFiles.clear",
-          "when": "!activeFilesBranch"
+          "command": "diffs.collapseAll",
+          "when": "false"
+        },
+        {
+          "command": "diffs.levelOn",
+          "when": "false"
+        },
+        {
+          "command": "diffs.levelOff",
+          "when": "false"
+        },
+        {
+          "command": "diffs.mainOn",
+          "when": "false"
+        },
+        {
+          "command": "diffs.mainOff",
+          "when": "false"
+        },
+        {
+          "command": "activeFiles.collapseAll",
+          "when": "false"
         },
         {
           "command": "activeFiles.openDiff",
@@ -175,18 +458,52 @@
         {
           "command": "activeFiles.remove",
           "when": "false"
+        },
+        {
+          "command": "favorites.addOpen",
+          "when": "favorites.canAdd"
+        },
+        {
+          "command": "favorites.removeOpen",
+          "when": "favorites.active"
+        },
+        {
+          "command": "favorites.addFolder",
+          "when": "false"
+        },
+        {
+          "command": "stack.add",
+          "when": "false"
+        },
+        {
+          "command": "stack.unstack",
+          "when": "false"
+        },
+        {
+          "command": "stack.refresh",
+          "when": "false"
+        },
+        {
+          "command": "branches.refresh",
+          "when": "false"
+        },
+        {
+          "command": "branches.pare",
+          "when": "false"
+        },
+        {
+          "command": "search2.refresh",
+          "when": "false"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "activeFiles",
-        "when": "!activeFilesBranch",
         "contents": "Edit a file and it will show up here."
       },
       {
-        "view": "activeFiles",
-        "when": "activeFilesBranch",
+        "view": "diffFiles",
         "contents": "No files have changed since this branch left main."
       }
     ]

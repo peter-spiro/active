@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { commandFailure, logCommand } from "./commandLog";
 
 const execFileAsync = promisify(execFile);
 const BASE_REFS = ["origin/main", "origin/master", "main", "master"];
 const BASE_SCHEME = "active-base";
+const LOCAL_DOCS = ["local"];
 
 type BaseQuery = {
   repo?: string;
@@ -23,9 +26,29 @@ export type BranchFile = {
 export type BranchSnapshot = {
   files: BranchFile[];
   message?: string;
+  baseLabel: string;
 };
 
-export async function collectBranchChanges(): Promise<BranchSnapshot> {
+export type DiffChainCommit = {
+  sha: string;
+  subject: string;
+  head: boolean;
+};
+
+export type DiffChain = {
+  label: string;
+  baseSha: string;
+  commits: DiffChainCommit[];
+};
+
+type Comparison = {
+  ref: string;
+  label: string;
+};
+
+export async function collectBranchChanges(
+  baseRef?: string,
+): Promise<BranchSnapshot> {
   const folders =
     vscode.workspace.workspaceFolders?.filter(
       (folder) => folder.uri.scheme === "file",
@@ -34,20 +57,23 @@ export async function collectBranchChanges(): Promise<BranchSnapshot> {
     return {
       files: [],
       message: "Open a local folder to compare this branch with main.",
+      baseLabel: "main",
     };
   }
 
   const files: BranchFile[] = [];
   const errors: string[] = [];
+  const labels: string[] = [];
   let repos = 0;
   for (const folder of folders) {
     try {
-      const found = await changesInFolder(folder);
+      const found = await changesInFolder(folder, baseRef);
       if (!found) {
         continue;
       }
       repos += 1;
-      files.push(...found);
+      labels.push(found.label);
+      files.push(...found.files);
     } catch (error) {
       errors.push(gitErrorMessage(error));
     }
@@ -57,6 +83,7 @@ export async function collectBranchChanges(): Promise<BranchSnapshot> {
     return {
       files: [],
       message: errors[0] ?? "This folder is not a git repository.",
+      baseLabel: "main",
     };
   }
   if (errors.length > 0) {
@@ -64,7 +91,9 @@ export async function collectBranchChanges(): Promise<BranchSnapshot> {
   }
 
   const seen = new Set<string>();
+  const uniqueLabels = [...new Set(labels)];
   return {
+    baseLabel: uniqueLabels.length === 1 ? uniqueLabels[0] : "main",
     files: files.filter((file) => {
       const key = file.uri.toString();
       if (seen.has(key)) {
@@ -105,13 +134,16 @@ export function registerBranchDiffProvider(): vscode.Disposable {
   });
 }
 
-export async function openBranchDiff(file: vscode.Uri): Promise<void> {
+export async function openBranchDiff(
+  file: vscode.Uri,
+  baseRef?: string,
+): Promise<void> {
   try {
     if (file.scheme !== "file") {
       void vscode.window.showErrorMessage("Diff is available for local files.");
       return;
     }
-    const place = await locateBranchFile(file);
+    const place = await locateBranchFile(file, baseRef);
     const name = path.basename(file.fsPath);
     const onDisk = await fileExists(file);
     if (onDisk && (await looksBinary(file))) {
@@ -131,7 +163,7 @@ export async function openBranchDiff(file: vscode.Uri): Promise<void> {
       );
       return;
     }
-    const title = `${name} (main base ↔ working folder)`;
+    const title = `${name} (${place.label}...working folder)`;
     const left = diffUri(file, {
       repo: place.repo,
       ref: place.forkPoint,
@@ -187,20 +219,20 @@ export function watchBranchSignals(onDirty: () => void): vscode.Disposable {
 
 async function changesInFolder(
   folder: vscode.WorkspaceFolder,
-): Promise<BranchFile[] | undefined> {
+  baseRef?: string,
+): Promise<{ files: BranchFile[]; label: string } | undefined> {
   const cwd = folder.uri.fsPath;
   if (!(await isRepo(cwd))) {
     return undefined;
   }
   const topLevel = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
-  const baseRef = await resolveBaseRef(topLevel);
-  const forkPoint = await resolveForkPoint(topLevel, baseRef);
+  const base = await comparisonPoint(topLevel, baseRef);
   const diff = await git(topLevel, [
     "diff",
     "--name-status",
     "--find-renames",
     "-z",
-    forkPoint,
+    base.ref,
     "--",
     cwd,
   ]);
@@ -212,7 +244,7 @@ async function changesInFolder(
     "--",
     cwd,
   ]);
-  return [
+  const files: BranchFile[] = [
     ...parseNameStatus(diff).map((change) => ({
       uri: uriForChange(folder, topLevel, change.path),
       detail: statusDetail(change.code),
@@ -225,6 +257,108 @@ async function changesInFolder(
         detail: "untracked",
       })),
   ];
+  const seen = new Set(files.map((file) => file.uri.toString()));
+  for (const local of await localDocFiles(folder)) {
+    const key = local.uri.toString();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    files.push(local);
+  }
+  return { label: base.label, files };
+}
+
+// local is kept in the list even when those files match main.
+async function localDocFiles(
+  folder: vscode.WorkspaceFolder,
+): Promise<BranchFile[]> {
+  const root = path.join(folder.uri.fsPath, ...LOCAL_DOCS);
+  const files: BranchFile[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".DS_Store") {
+        continue;
+      }
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolute);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      files.push({
+        uri: vscode.Uri.file(existingPath(absolute)),
+        detail: "local",
+      });
+    }
+  };
+  await walk(root);
+  return files;
+}
+
+// Commits after the active base (main, or the previous stack level) up to HEAD.
+// Newest first. The base itself is baseSha, not one of the commits.
+export async function listDiffChain(
+  baseRef?: string,
+): Promise<DiffChain | undefined> {
+  const folder = vscode.workspace.workspaceFolders?.find(
+    (item) => item.uri.scheme === "file",
+  );
+  if (!folder || !(await isRepo(folder.uri.fsPath))) {
+    return undefined;
+  }
+  const repo = (
+    await git(folder.uri.fsPath, ["rev-parse", "--show-toplevel"])
+  ).trim();
+  const base = await comparisonPoint(repo, baseRef);
+  const head = (await git(repo, ["rev-parse", "HEAD"])).trim();
+  const log = await git(repo, [
+    "log",
+    "--format=%H%x09%s",
+    `${base.ref}..HEAD`,
+  ]);
+  const commits: DiffChainCommit[] = [];
+  for (const line of log.split("\n")) {
+    if (!line) {
+      continue;
+    }
+    const tab = line.indexOf("\t");
+    const sha = tab < 0 ? line : line.slice(0, tab);
+    commits.push({
+      sha,
+      subject: tab < 0 ? sha.slice(0, 7) : line.slice(tab + 1),
+      head: sha === head,
+    });
+  }
+  return { label: base.label, baseSha: base.ref, commits };
+}
+
+// A named baseRef is the previous stack level. A commit id is that commit.
+// Otherwise the base is main. The comparison commit is merge-base(base, HEAD),
+// the same point as `git diff <base>...HEAD`, compared with the working tree.
+async function comparisonPoint(
+  repo: string,
+  baseRef?: string,
+): Promise<Comparison> {
+  if (baseRef && (await refExists(repo, baseRef))) {
+    try {
+      const ref = (await git(repo, ["merge-base", "HEAD", baseRef])).trim();
+      return { ref, label: comparisonLabel(baseRef, ref) };
+    } catch {
+      // The previous level is not an ancestor we can compare. Fall back to main.
+    }
+  }
+  const mainRef = await resolveBaseRef(repo);
+  const ref = (await git(repo, ["merge-base", "HEAD", mainRef])).trim();
+  return { ref, label: "main" };
 }
 
 async function isRepo(cwd: string): Promise<boolean> {
@@ -267,54 +401,8 @@ async function resolveBaseRef(cwd: string): Promise<string> {
   throw new Error("Could not find a main branch.");
 }
 
-// merge-base(HEAD, main) follows main forward after main is merged into the
-// branch. The fork point is the main commit this branch originally left:
-// the parent, on main, of the earliest first-parent commit not in main.
-async function resolveForkPoint(cwd: string, baseRef: string): Promise<string> {
-  const mergeBase = (await git(cwd, ["merge-base", "HEAD", baseRef])).trim();
-  let oldest = "";
-  try {
-    const listing = await git(cwd, [
-      "rev-list",
-      "--first-parent",
-      "--reverse",
-      `${baseRef}..HEAD`,
-    ]);
-    oldest = listing.split("\n").find((line) => line.length > 0) ?? "";
-  } catch {
-    return mergeBase;
-  }
-  if (!oldest) {
-    return mergeBase;
-  }
-  let parents: string[] = [];
-  try {
-    const line = (
-      await git(cwd, ["rev-list", "--parents", "-n", "1", oldest])
-    ).trim();
-    parents = line.split(/\s+/).slice(1);
-  } catch {
-    return mergeBase;
-  }
-  for (const parent of parents) {
-    if (await isAncestor(cwd, parent, baseRef)) {
-      return parent;
-    }
-  }
-  return mergeBase;
-}
-
-async function isAncestor(
-  cwd: string,
-  commit: string,
-  ref: string,
-): Promise<boolean> {
-  try {
-    await git(cwd, ["merge-base", "--is-ancestor", commit, ref]);
-    return true;
-  } catch {
-    return false;
-  }
+function comparisonLabel(baseRef: string, resolved: string): string {
+  return /^[0-9a-f]{7,40}$/i.test(baseRef) ? resolved.slice(0, 7) : baseRef;
 }
 
 async function refExists(cwd: string, ref: string): Promise<boolean> {
@@ -415,25 +503,28 @@ function existingPath(value: string): string {
   }
 }
 
-async function locateBranchFile(file: vscode.Uri): Promise<{
+async function locateBranchFile(
+  file: vscode.Uri,
+  baseRef?: string,
+): Promise<{
   repo: string;
   baseRelative: string;
   forkPoint: string;
+  label: string;
 }> {
   const dir = path.dirname(file.fsPath);
   if (!(await isRepo(dir))) {
     throw new Error("This folder is not a git repository.");
   }
   const repo = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
-  const baseRef = await resolveBaseRef(repo);
-  const forkPoint = await resolveForkPoint(repo, baseRef);
+  const base = await comparisonPoint(repo, baseRef);
   const relative = gitRelative(repo, file.fsPath);
   const listed = await git(repo, [
     "diff",
     "--name-status",
     "--find-renames",
     "-z",
-    forkPoint,
+    base.ref,
     "--",
     file.fsPath,
   ]);
@@ -442,7 +533,8 @@ async function locateBranchFile(file: vscode.Uri): Promise<{
   );
   return {
     repo,
-    forkPoint,
+    label: base.label,
+    forkPoint: base.ref,
     baseRelative: match?.previous ?? relative,
   };
 }
@@ -522,25 +614,40 @@ async function readBaseBytes(
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  return String(stdout);
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    logCommand("git", args, cwd, stdout, stderr);
+    return String(stdout);
+  } catch (error) {
+    const failure = commandFailure(error);
+    logCommand("git", args, cwd, failure.stdout, failure.stderr, failure.code);
+    throw error;
+  }
 }
 
 async function gitBytes(cwd: string, args: string[]): Promise<Buffer> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "buffer",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      encoding: "buffer",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    const bytes = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+    logCommand("git", args, cwd, bytes, stderr);
+    return bytes;
+  } catch (error) {
+    const failure = commandFailure(error);
+    logCommand("git", args, cwd, failure.stdout, failure.stderr, failure.code);
+    throw error;
+  }
 }
 
 function gitErrorMessage(error: unknown): string {

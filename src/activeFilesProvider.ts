@@ -1,10 +1,15 @@
 import * as vscode from "vscode";
 import { collectBranchChanges } from "./branchChanges";
+import { matchesFilter } from "./globMatch";
 
 const FILES_KEY = "active.entries";
+const FILTER_KEY = "active.filter";
 const MODE_KEY = "active.viewMode";
-const CONTENT_KEY = "active.contentMode";
 const LAYOUT_KEY = "active.layout";
+const DIFFS_FILTER_KEY = "diffs.filter";
+const DIFFS_LAYOUT_KEY = "diffs.layout";
+const DIFFS_BASE_KEY = "diffs.base";
+const DIFFS_COMMIT_KEY = "diffs.commit";
 const MAX_TRACKED = 500;
 const REFRESH_DELAY_MS = 300;
 const PERSIST_DELAY_MS = 500;
@@ -16,14 +21,10 @@ const TRACKABLE_SCHEMES = new Set([
   "vscode-remote",
   "vscode-vfs",
 ]);
-const BRANCH_STATUS_SCHEME = "active-branch-status";
+export const BRANCH_STATUS_SCHEME = "active-branch-status";
 
-export type ContentMode = "active" | "branchOpen" | "branchDiff";
+export type PanelKind = "recent" | "diffs";
 export type Layout = "list" | "tree";
-
-export function isBranchMode(mode: ContentMode): boolean {
-  return mode === "branchOpen" || mode === "branchDiff";
-}
 
 type Tracked = {
   uri: vscode.Uri;
@@ -55,43 +56,28 @@ type MessageItem = {
   kind: "message";
   id: string;
   label: string;
-  icon: "loading" | "warning";
+  icon?: "loading" | "warning";
 };
 
 export type ActiveItem = FileItem | DirItem | MessageItem;
 
-function readSettings(state: vscode.Memento): {
-  content: ContentMode;
-  layout: Layout;
-} {
-  const legacy = legacySettings(state.get<unknown>(MODE_KEY));
-  return {
-    content: readContentMode(state.get<unknown>(CONTENT_KEY)) ?? legacy.content,
-    layout: readLayout(state.get<unknown>(LAYOUT_KEY)) ?? legacy.layout,
-  };
+function readLayoutSetting(state: vscode.Memento): Layout {
+  return (
+    readLayout(state.get<unknown>(LAYOUT_KEY)) ??
+    legacyLayout(state.get<unknown>(MODE_KEY))
+  );
 }
 
-function legacySettings(value: unknown): {
-  content: ContentMode;
-  layout: Layout;
-} {
-  if (value === "tree") {
-    return { content: "active", layout: "tree" };
+function legacyLayout(value: unknown): Layout {
+  if (
+    value === "tree" ||
+    value === "branch" ||
+    value === "branchOpen" ||
+    value === "branchDiff"
+  ) {
+    return "tree";
   }
-  if (value === "branch" || value === "branchOpen") {
-    return { content: "branchOpen", layout: "tree" };
-  }
-  if (value === "branchDiff") {
-    return { content: "branchDiff", layout: "tree" };
-  }
-  return { content: "active", layout: "list" };
-}
-
-function readContentMode(value: unknown): ContentMode | undefined {
-  if (value === "active" || value === "branchOpen" || value === "branchDiff") {
-    return value;
-  }
-  return undefined;
+  return "list";
 }
 
 function readLayout(value: unknown): Layout | undefined {
@@ -141,18 +127,22 @@ export class ActiveFilesProvider
   implements vscode.TreeDataProvider<ActiveItem>, vscode.Disposable
 {
   private readonly entries = new Map<string, Tracked>();
-  private mode: ContentMode;
-  private layout: Layout;
+  private recentLayout: Layout;
+  private diffsLayout: Layout;
+  private recentFilter = "";
+  private diffsFilter = "";
+  private diffFromParent = false;
+  private pinnedCommit: string | undefined;
+  private stackParent: string | undefined;
   private disposed = false;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private persistTimer: ReturnType<typeof setTimeout> | undefined;
   private branchTimer: ReturnType<typeof setTimeout> | undefined;
   private branchEntries: Tracked[] = [];
   private branchMessage: string | undefined;
+  private branchBase = "main";
   private branchState: "loading" | "ready" = "ready";
   private branchGeneration = 0;
-  private modeRevision = 0;
-  private modeSave: Promise<void> = Promise.resolve();
 
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<
     ActiveItem | undefined
@@ -166,25 +156,47 @@ export class ActiveFilesProvider
     private readonly workspaceState: vscode.Memento,
     private readonly globalState: vscode.Memento,
   ) {
-    const settings = readSettings(this.globalState);
-    this.mode = settings.content;
-    this.layout = settings.layout;
+    this.recentLayout = readLayoutSetting(this.globalState);
+    this.diffsLayout =
+      readLayout(this.globalState.get<unknown>(DIFFS_LAYOUT_KEY)) ??
+      this.recentLayout;
+    this.recentFilter = readText(this.workspaceState.get<unknown>(FILTER_KEY));
+    this.diffsFilter = readText(
+      this.workspaceState.get<unknown>(DIFFS_FILTER_KEY),
+    );
+    this.diffFromParent = this.workspaceState.get(DIFFS_BASE_KEY) === "parent";
+    this.pinnedCommit = readCommit(this.workspaceState.get(DIFFS_COMMIT_KEY));
     this.load();
   }
 
-  get count(): number {
-    if (isBranchMode(this.mode)) {
-      return this.branchMessage ? 0 : this.branchEntries.length;
+  filterText(kind: PanelKind): string {
+    return kind === "diffs" ? this.diffsFilter : this.recentFilter;
+  }
+
+  setFilter(kind: PanelKind, value: string): void {
+    if (value === this.filterText(kind)) {
+      return;
     }
-    return this.entries.size;
+    if (kind === "diffs") {
+      this.diffsFilter = value;
+      void this.workspaceState.update(DIFFS_FILTER_KEY, value);
+    } else {
+      this.recentFilter = value;
+      void this.workspaceState.update(FILTER_KEY, value);
+    }
+    this.emit();
   }
 
-  get contentMode(): ContentMode {
-    return this.mode;
+  count(kind: PanelKind = "recent"): number {
+    return countFiles(this.getChildren(undefined, kind));
   }
 
-  get layoutMode(): Layout {
-    return this.layout;
+  get branchBaseLabel(): string {
+    return this.branchBase;
+  }
+
+  layoutMode(kind: PanelKind): Layout {
+    return kind === "diffs" ? this.diffsLayout : this.recentLayout;
   }
 
   dispose(): void {
@@ -203,7 +215,7 @@ export class ActiveFilesProvider
   }
 
   redraw(): void {
-    this.emit("view");
+    this.emit();
   }
 
   touch(uri: vscode.Uri): void {
@@ -235,56 +247,87 @@ export class ActiveFilesProvider
     this.emit();
   }
 
-  async setLayout(layout: Layout): Promise<void> {
-    if (this.layout === layout) {
-      return;
-    }
-    this.layout = layout;
-    this.emit("view");
-    await this.globalState.update(LAYOUT_KEY, layout);
+  get hasStackParent(): boolean {
+    return this.stackParent !== undefined;
   }
 
-  async setMode(mode: ContentMode): Promise<void> {
-    if (this.mode === mode) {
-      return;
-    }
-    const wasBranch = isBranchMode(this.mode);
-    this.mode = mode;
-    const nowBranch = isBranchMode(mode);
-    if (!nowBranch) {
-      this.cancelBranchReload();
-    } else if (
-      !wasBranch &&
-      this.branchEntries.length === 0 &&
-      !this.branchMessage
-    ) {
-      this.branchState = "loading";
-    }
-    this.emit("view");
-    const persist = this.persistMode(mode);
-    if (nowBranch && !wasBranch && (await this.loadBranchChanges())) {
-      this.emit("view");
-    }
-    await persist;
+  get diffBase(): "main" | "parent" {
+    return this.diffFromParent ? "parent" : "main";
   }
 
-  private persistMode(mode: ContentMode): Promise<void> {
-    const revision = ++this.modeRevision;
-    const save = this.modeSave.then(() => {
-      if (revision !== this.modeRevision || this.disposed) {
-        return undefined;
-      }
-      return this.globalState.update(CONTENT_KEY, mode);
-    });
-    this.modeSave = save.then(
-      () => undefined,
-      () => undefined,
-    );
-    return save;
+  diffBaseLabel(): string {
+    if (this.pinnedCommit) {
+      return this.pinnedCommit.slice(0, 7);
+    }
+    if (this.diffFromParent && this.stackParent) {
+      return this.stackParent;
+    }
+    return "main";
+  }
+
+  rangeRef(): string | undefined {
+    if (this.diffFromParent && this.stackParent) {
+      return this.stackParent;
+    }
+    return undefined;
+  }
+
+  diffBaseRef(): string | undefined {
+    return this.pinnedCommit ?? this.rangeRef();
+  }
+
+  get pinnedCommitSha(): string | undefined {
+    return this.pinnedCommit;
+  }
+
+  setStackParent(name: string | undefined): void {
+    if (name === this.stackParent) {
+      return;
+    }
+    this.stackParent = name;
+    if (this.diffFromParent) {
+      void this.reloadBranch();
+    }
+  }
+
+  async useDiffBase(mode: "main" | "parent"): Promise<void> {
+    const next = mode === "parent";
+    if (next === this.diffFromParent && !this.pinnedCommit) {
+      return;
+    }
+    this.diffFromParent = next;
+    this.pinnedCommit = undefined;
+    await this.workspaceState.update(DIFFS_BASE_KEY, mode);
+    await this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
+    await this.reloadBranch();
+  }
+
+  async useDiffCommit(sha: string | undefined): Promise<void> {
+    const next = sha?.toLowerCase();
+    if (next === this.pinnedCommit) {
+      return;
+    }
+    this.pinnedCommit = next;
+    await this.workspaceState.update(DIFFS_COMMIT_KEY, next);
+    await this.reloadBranch();
+  }
+
+  async setLayout(kind: PanelKind, layout: Layout): Promise<void> {
+    if (this.layoutMode(kind) === layout) {
+      return;
+    }
+    if (kind === "diffs") {
+      this.diffsLayout = layout;
+      await this.globalState.update(DIFFS_LAYOUT_KEY, layout);
+    } else {
+      this.recentLayout = layout;
+      await this.globalState.update(LAYOUT_KEY, layout);
+    }
+    this.emit();
   }
 
   onBranchDirty(): void {
-    if (!isBranchMode(this.mode) || this.disposed) {
+    if (this.disposed) {
       return;
     }
     if (this.branchTimer) {
@@ -298,24 +341,21 @@ export class ActiveFilesProvider
 
   async reloadBranch(): Promise<void> {
     this.cancelBranchReload();
-    if (!isBranchMode(this.mode) || this.disposed) {
+    if (this.disposed) {
       return;
     }
     if (await this.loadBranchChanges()) {
-      this.emit("view");
+      this.emit();
     }
   }
 
   async ensureBranchLoaded(): Promise<void> {
-    if (!isBranchMode(this.mode)) {
-      return;
-    }
     if (this.branchEntries.length === 0 && !this.branchMessage) {
       this.branchState = "loading";
-      this.emit("view");
+      this.emit();
     }
     if (await this.loadBranchChanges()) {
-      this.emit("view");
+      this.emit();
     }
   }
 
@@ -370,8 +410,8 @@ export class ActiveFilesProvider
     this.emit();
   }
 
-  async refresh(): Promise<void> {
-    if (isBranchMode(this.mode)) {
+  async refresh(kind: PanelKind = "recent"): Promise<void> {
+    if (kind === "diffs") {
       await this.reloadBranch();
       return;
     }
@@ -408,7 +448,10 @@ export class ActiveFilesProvider
     this.emit();
   }
 
-  getTreeItem(element: ActiveItem): vscode.TreeItem {
+  getTreeItem(
+    element: ActiveItem,
+    kind: PanelKind = "recent",
+  ): vscode.TreeItem {
     if (element.kind === "message") {
       const item = new vscode.TreeItem(
         element.label,
@@ -416,9 +459,11 @@ export class ActiveFilesProvider
       );
       item.id = element.id;
       item.contextValue = "activeMessage";
-      item.iconPath = new vscode.ThemeIcon(
-        element.icon === "loading" ? "loading~spin" : "warning",
-      );
+      if (element.icon === "loading") {
+        item.iconPath = new vscode.ThemeIcon("loading~spin");
+      } else if (element.icon === "warning") {
+        item.iconPath = new vscode.ThemeIcon("warning");
+      }
       return item;
     }
 
@@ -429,7 +474,7 @@ export class ActiveFilesProvider
       );
       item.id = element.id;
       item.contextValue = "activeDir";
-      if (element.uri && !isBranchMode(this.mode)) {
+      if (element.uri && kind !== "diffs") {
         item.resourceUri = element.uri;
       } else {
         item.iconPath = new vscode.ThemeIcon("folder");
@@ -442,23 +487,15 @@ export class ActiveFilesProvider
       vscode.TreeItemCollapsibleState.None,
     );
     item.id = `file:${element.uri.toString()}`;
-    if (isBranchMode(this.mode)) {
+    if (kind === "diffs") {
       item.resourceUri = branchStatusUri(element.uri, element.detail);
       item.contextValue =
         element.detail === "deleted" ? "branchFileDeleted" : "branchFile";
-      const where = this.layout === "list" ? locationLabel(element.uri) : "";
+      const where =
+        this.diffsLayout === "list" ? locationLabel(element.uri) : "";
       item.description = where || undefined;
-      item.tooltip =
-        this.mode === "branchDiff" && element.detail !== "deleted"
-          ? `${branchTooltip(element.uri)}\nDouble-click to open the file`
-          : branchTooltip(element.uri);
-      if (this.mode === "branchDiff") {
-        item.command = {
-          command: "activeFiles.openDiff",
-          title: "Open Diff",
-          arguments: [element.uri],
-        };
-      } else if (element.detail !== "deleted") {
+      item.tooltip = branchTooltip(element.uri);
+      if (element.detail !== "deleted") {
         item.command = {
           command: "vscode.open",
           title: "Open",
@@ -472,7 +509,7 @@ export class ActiveFilesProvider
     item.contextValue = "activeFile";
     item.tooltip = tooltip(element.uri, element.editedAt);
     item.description =
-      this.layout === "list"
+      this.recentLayout === "list"
         ? listDescription(element.uri, element.editedAt)
         : element.detail;
     item.command = {
@@ -483,18 +520,45 @@ export class ActiveFilesProvider
     return item;
   }
 
-  getChildren(element?: ActiveItem): ActiveItem[] {
+  getChildren(element?: ActiveItem, kind: PanelKind = "recent"): ActiveItem[] {
+    const items = this.unfilteredChildren(element, kind);
+    const filter = this.filterText(kind);
+    if (element || filter.trim().length === 0) {
+      return items;
+    }
+    const filtered = filterItems(items, (uri) => this.uriMatches(kind, uri));
+    if (countFiles(filtered) === 0 && countFiles(items) > 0) {
+      return [
+        {
+          kind: "message",
+          id: "filter-empty",
+          label: "No files match the filter.",
+        },
+      ];
+    }
+    return filtered;
+  }
+
+  private uriMatches(kind: PanelKind, uri: vscode.Uri): boolean {
+    const place = filterPlace(uri);
+    return matchesFilter(this.filterText(kind), place.relative, place.name);
+  }
+
+  private unfilteredChildren(
+    element: ActiveItem | undefined,
+    kind: PanelKind,
+  ): ActiveItem[] {
     if (element?.kind === "file" || element?.kind === "message") {
       return [];
     }
     if (element?.kind === "dir") {
       return element.children;
     }
-    if (isBranchMode(this.mode)) {
+    if (kind === "diffs") {
       return this.branchChildren();
     }
     const tracked = [...this.entries.values()];
-    if (this.layout === "list") {
+    if (this.recentLayout === "list") {
       return tracked
         .sort((a, b) => compareFileName(a.uri, b.uri))
         .map((entry) => ({
@@ -522,12 +586,12 @@ export class ActiveFilesProvider
         {
           kind: "message",
           id: "branch-loading",
-          label: "Comparing this branch with main…",
+          label: `Comparing this branch with ${this.diffBaseLabel()}…`,
           icon: "loading",
         },
       ];
     }
-    if (this.layout === "tree") {
+    if (this.diffsLayout === "tree") {
       return buildTree(this.branchEntries);
     }
     return [...this.branchEntries]
@@ -542,12 +606,8 @@ export class ActiveFilesProvider
 
   private async loadBranchChanges(): Promise<boolean> {
     const generation = ++this.branchGeneration;
-    const snapshot = await collectBranchChanges();
-    if (
-      generation !== this.branchGeneration ||
-      this.disposed ||
-      !isBranchMode(this.mode)
-    ) {
+    const snapshot = await collectBranchChanges(this.diffBaseRef());
+    if (generation !== this.branchGeneration || this.disposed) {
       return false;
     }
     this.branchEntries = snapshot.files.map((file) => ({
@@ -556,7 +616,15 @@ export class ActiveFilesProvider
       detail: file.detail,
     }));
     this.branchMessage = snapshot.message;
+    this.branchBase = snapshot.baseLabel;
     this.branchState = "ready";
+    if (
+      this.pinnedCommit &&
+      snapshot.baseLabel !== this.pinnedCommit.slice(0, 7)
+    ) {
+      this.pinnedCommit = undefined;
+      void this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
+    }
     return true;
   }
 
@@ -654,16 +722,23 @@ export class ActiveFilesProvider
     return this.workspaceState.update(FILES_KEY, data);
   }
 
-  private emit(scope: "active" | "view" = "active"): void {
+  private emit(): void {
     if (this.disposed) {
       return;
     }
-    if (scope === "active" && isBranchMode(this.mode)) {
-      return;
-    }
     this._onDidChangeTreeData.fire(undefined);
-    this._onDidChangeCount.fire(this.count);
+    this._onDidChangeCount.fire(this.count("recent"));
   }
+}
+
+function readText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readCommit(value: unknown): string | undefined {
+  return typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
 }
 
 function isPersistedEntry(value: unknown): value is PersistedEntry {
@@ -676,6 +751,60 @@ function isPersistedEntry(value: unknown): value is PersistedEntry {
     typeof entry.editedAt === "number" &&
     Number.isFinite(entry.editedAt)
   );
+}
+
+function filterPlace(uri: vscode.Uri): { relative: string; name: string } {
+  const name = baseName(uri);
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  if (!folder) {
+    return { relative: name, name };
+  }
+  const parts = relativeParts(folder.uri, uri);
+  if (!parts || parts.length === 0) {
+    return { relative: name, name };
+  }
+  const relative = parts.join("/");
+  const multi = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+  return {
+    relative: multi ? `${folder.name}/${relative}` : relative,
+    name,
+  };
+}
+
+function filterItems(
+  items: ActiveItem[],
+  matches: (uri: vscode.Uri) => boolean,
+): ActiveItem[] {
+  const filtered: ActiveItem[] = [];
+  for (const item of items) {
+    if (item.kind === "message") {
+      filtered.push(item);
+      continue;
+    }
+    if (item.kind === "file") {
+      if (matches(item.uri)) {
+        filtered.push(item);
+      }
+      continue;
+    }
+    const children = filterItems(item.children, matches);
+    if (children.length > 0) {
+      filtered.push({ ...item, children });
+    }
+  }
+  return filtered;
+}
+
+function countFiles(items: ActiveItem[]): number {
+  let count = 0;
+  for (const item of items) {
+    if (item.kind === "file") {
+      count += 1;
+    } else if (item.kind === "dir") {
+      count += countFiles(item.children);
+    }
+  }
+  return count;
 }
 
 function compareFileName(a: vscode.Uri, b: vscode.Uri): number {
@@ -746,17 +875,23 @@ function branchStatusUri(
   file: vscode.Uri,
   detail: string | undefined,
 ): vscode.Uri {
+  const tone = branchTone(detail);
+  if (!tone) {
+    return file;
+  }
   return vscode.Uri.from({
     scheme: BRANCH_STATUS_SCHEME,
     path: file.path,
-    query: branchTone(detail),
+    query: tone,
   });
 }
 
 function branchTone(
   detail: string | undefined,
-): "new" | "modified" | "deleted" {
+): "new" | "modified" | "deleted" | "" {
   switch (detail) {
+    case "local":
+      return "";
     case "added":
     case "untracked":
     case "renamed":

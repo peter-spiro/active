@@ -20,6 +20,9 @@ await cp(
 await cp(path.join(root, "out"), path.join(destination, "out"), {
   recursive: true,
 });
+await cp(path.join(root, "media"), path.join(destination, "media"), {
+  recursive: true,
+});
 
 console.log(`Installed Active to ${destination}`);
 console.log("Reload Cursor to pick it up.");

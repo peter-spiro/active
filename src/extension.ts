@@ -1,121 +1,155 @@
 import * as vscode from "vscode";
+import { ActivePanel } from "./activePanel";
 import {
   ActiveFilesProvider,
-  isBranchMode,
   isTrackable,
   registerBranchStatusDecorations,
   uriFromCommandArgument,
-  type ContentMode,
   type Layout,
+  type PanelKind,
 } from "./activeFilesProvider";
 import {
+  listDiffChain,
   openBranchDiff,
   registerBranchDiffProvider,
   watchBranchSignals,
 } from "./branchChanges";
+import { BranchListPanel } from "./branchListPanel";
+import { disposeCommandLog } from "./commandLog";
+import { BranchSwitch } from "./branchSwitch";
+import { Favorites, openFavoriteTarget } from "./favorites";
+import { FavoritesPanel } from "./favoritesPanel";
+import { LocalBranches } from "./localBranches";
+import { pareBranches } from "./pareBranches";
+import { Search2Panel } from "./search2Panel";
+import { StackList } from "./stack";
 
-const DOUBLE_CLICK_MS = 350;
-const CONTENT_MODE_KEY = "activeFilesContentMode";
-const LAYOUT_KEY = "activeFilesLayout";
-const BRANCH_MODE_KEY = "activeFilesBranch";
-
-const MODE_CHOICES: Array<{
-  mode: ContentMode;
-  label: string;
-  description: string;
-}> = [
-  {
-    mode: "active",
-    label: "Active",
-    description: "Files you have edited",
-  },
-  {
-    mode: "branchOpen",
-    label: "Branch - Open",
-    description: "Open files changed since this branch left main",
-  },
-  {
-    mode: "branchDiff",
-    label: "Branch - Diff",
-    description: "Review diffs against the point this branch left main",
-  },
-];
+const RECENT_LAYOUT_KEY = "activeFilesLayout";
+const DIFFS_LAYOUT_KEY = "diffsLayout";
+const DIFFS_STACK_PARENT_KEY = "diffs.hasStackParent";
+const DIFFS_BASE_KEY = "diffs.base";
+const FAVORITE_ACTIVE_KEY = "favorites.active";
+const FAVORITE_CAN_ADD_KEY = "favorites.canAdd";
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new ActiveFilesProvider(
     context.workspaceState,
     context.globalState,
   );
-  publishChrome(provider.contentMode, provider.layoutMode);
-  const treeView = vscode.window.createTreeView("activeFiles", {
-    treeDataProvider: provider,
-    showCollapseAll: false,
-  });
-
-  const syncChrome = (): void => {
-    treeView.description = `${contentLabel(provider.contentMode)} · ${layoutLabel(provider.layoutMode)}`;
-    publishChrome(provider.contentMode, provider.layoutMode);
-  };
-
-  const showMode = async (mode: ContentMode): Promise<void> => {
-    const pending = provider.setMode(mode);
-    syncChrome();
-    await pending;
-  };
-
-  const showLayout = async (layout: Layout): Promise<void> => {
-    const pending = provider.setLayout(layout);
-    syncChrome();
-    await pending;
-  };
-
-  const updateBadge = (count: number): void => {
-    if (count <= 0) {
-      treeView.badge = undefined;
-      return;
-    }
-    const branch = isBranchMode(provider.contentMode);
-    const noun = branch
-      ? count === 1
-        ? "changed file"
-        : "changed files"
-      : count === 1
-        ? "edited file"
-        : "edited files";
-    treeView.badge = {
-      value: count,
-      tooltip: `${count} ${noun}`,
-    };
-  };
-
-  const selectMode = async (): Promise<void> => {
-    const current = provider.contentMode;
-    const picked = await vscode.window.showQuickPick(
-      MODE_CHOICES.map((choice) => ({
-        label: `${choice.mode === current ? "$(check)" : "$(blank)"} ${choice.label}`,
-        description: choice.description,
-        mode: choice.mode,
-      })),
-      { title: "Select mode", placeHolder: contentLabel(current) },
+  const favorites = new Favorites(context.globalState, context.workspaceState);
+  const recentPanel = new ActivePanel(provider, "recent", favorites);
+  const diffsPanel = new ActivePanel(provider, "diffs", favorites);
+  const favoritesPanel = new FavoritesPanel(favorites);
+  const branchSwitch = new BranchSwitch(context.workspaceState);
+  const stack = new StackList(branchSwitch);
+  const stackPanel = new BranchListPanel(stack, "level");
+  const branches = new LocalBranches(branchSwitch);
+  const branchesPanel = new BranchListPanel(branches, "branch");
+  const searchPanel = new Search2Panel(context.workspaceState);
+  const publishLayouts = (): void => {
+    void vscode.commands.executeCommand(
+      "setContext",
+      RECENT_LAYOUT_KEY,
+      provider.layoutMode("recent"),
     );
-    if (!picked) {
+    void vscode.commands.executeCommand(
+      "setContext",
+      DIFFS_LAYOUT_KEY,
+      provider.layoutMode("diffs"),
+    );
+  };
+
+  const publishDiffBase = (): void => {
+    void vscode.commands.executeCommand(
+      "setContext",
+      DIFFS_STACK_PARENT_KEY,
+      provider.hasStackParent,
+    );
+    void vscode.commands.executeCommand(
+      "setContext",
+      DIFFS_BASE_KEY,
+      provider.diffBase,
+    );
+  };
+
+  const selectDiffBase = async (mode: "main" | "parent"): Promise<void> => {
+    await provider.useDiffBase(mode);
+    publishDiffBase();
+  };
+
+  const showLayout = async (kind: PanelKind, layout: Layout): Promise<void> => {
+    await provider.setLayout(kind, layout);
+    publishLayouts();
+  };
+
+  const publishFavorite = (): void => {
+    const uri = openFavoriteTarget();
+    const favorite = !!uri && favorites.has(uri);
+    void vscode.commands.executeCommand(
+      "setContext",
+      FAVORITE_ACTIVE_KEY,
+      favorite,
+    );
+    void vscode.commands.executeCommand(
+      "setContext",
+      FAVORITE_CAN_ADD_KEY,
+      !!uri && !favorite,
+    );
+  };
+
+  const tagOpen = (add: boolean): void => {
+    const uri = openFavoriteTarget();
+    if (!uri) {
+      void vscode.window.showInformationMessage(
+        "Open a file to tag it as a favorite.",
+      );
       return;
     }
-    await showMode(picked.mode);
+    if (add) {
+      favorites.add(uri);
+    } else {
+      favorites.remove(uri);
+    }
   };
 
   context.subscriptions.push(
-    treeView,
+    { dispose: disposeCommandLog },
+    recentPanel,
+    diffsPanel,
     provider,
-    provider.onDidChangeCount(updateBadge),
-    treeView.onDidChangeVisibility((event) => {
-      if (!event.visible) {
-        return;
-      }
-      if (isBranchMode(provider.contentMode)) {
-        void provider.reloadBranch();
-      } else {
+    favorites,
+    favoritesPanel,
+    stack,
+    stackPanel,
+    branches,
+    branchesPanel,
+    searchPanel,
+    vscode.window.registerWebviewViewProvider("stackLevels", stackPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("localBranches", branchesPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("diffFiles", diffsPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("activeFiles", recentPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("favoriteFiles", favoritesPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("search2", searchPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    recentPanel.onDidChangeVisibility((visible) => {
+      if (visible) {
         provider.redraw();
+      }
+    }),
+    diffsPanel.onDidChangeVisibility((visible) => {
+      if (visible) {
+        void provider.reloadBranch();
       }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
@@ -139,11 +173,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidRenameFiles((event) => {
       for (const file of event.files) {
         provider.rename(file.oldUri, file.newUri);
+        favorites.rename(file.oldUri, file.newUri);
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
       for (const uri of event.files) {
         provider.forget(uri);
+        favorites.remove(uri);
+      }
+      if (event.files.length > 0) {
+        provider.onBranchDirty();
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
@@ -161,35 +200,55 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     watchBranchSignals(() => provider.onBranchDirty()),
     vscode.commands.registerCommand("activeFiles.refresh", () =>
-      provider.refresh(),
+      provider.refresh("recent"),
+    ),
+    vscode.commands.registerCommand("activeFiles.collapseAll", () =>
+      recentPanel.collapseAll(),
     ),
     vscode.commands.registerCommand("activeFiles.clear", () => {
-      if (!isBranchMode(provider.contentMode)) {
-        provider.clear();
-      }
+      provider.clear();
     }),
-    vscode.commands.registerCommand("activeFiles.selectMode", () =>
-      selectMode(),
-    ),
     vscode.commands.registerCommand("activeFiles.showList", () =>
-      showLayout("list"),
+      showLayout("recent", "list"),
     ),
     vscode.commands.registerCommand("activeFiles.showTree", () =>
-      showLayout("tree"),
+      showLayout("recent", "tree"),
     ),
-    vscode.commands.registerCommand("activeFiles.showActive", () =>
-      showMode("active"),
+    vscode.commands.registerCommand("diffs.refresh", () =>
+      provider.refresh("diffs"),
     ),
-    vscode.commands.registerCommand("activeFiles.showBranch", () =>
-      showMode("branchOpen"),
+    vscode.commands.registerCommand("diffs.collapseAll", () =>
+      diffsPanel.collapseAll(),
     ),
-    vscode.commands.registerCommand("activeFiles.showBranchDiff", () =>
-      showMode("branchDiff"),
+    vscode.commands.registerCommand("diffs.showList", () =>
+      showLayout("diffs", "list"),
     ),
+    vscode.commands.registerCommand("diffs.showTree", () =>
+      showLayout("diffs", "tree"),
+    ),
+    vscode.commands.registerCommand("diffs.levelOn", () =>
+      selectDiffBase("parent"),
+    ),
+    vscode.commands.registerCommand("diffs.levelOff", () =>
+      selectDiffBase("parent"),
+    ),
+    vscode.commands.registerCommand("diffs.mainOn", () =>
+      selectDiffBase("main"),
+    ),
+    vscode.commands.registerCommand("diffs.mainOff", () =>
+      selectDiffBase("main"),
+    ),
+    vscode.commands.registerCommand("diffs.pickCommit", () =>
+      pickDiffCommit(provider),
+    ),
+    stack.onDidChange(() => {
+      provider.setStackParent(stack.parentBranch());
+      publishDiffBase();
+    }),
     vscode.commands.registerCommand("activeFiles.openDiff", (arg: unknown) => {
       const uri = arg instanceof vscode.Uri ? arg : uriFromCommandArgument(arg);
       if (uri) {
-        openDiffOrFile(uri);
+        void openBranchDiff(uri, provider.diffBaseRef());
       }
     }),
     vscode.commands.registerCommand("activeFiles.openFile", (arg: unknown) => {
@@ -205,6 +264,59 @@ export function activate(context: vscode.ExtensionContext): void {
       if (uri) {
         provider.remove(uri);
       }
+    }),
+    vscode.commands.registerCommand("favorites.addOpen", () => tagOpen(true)),
+    vscode.commands.registerCommand("favorites.removeOpen", () =>
+      tagOpen(false),
+    ),
+    vscode.commands.registerCommand(
+      "favorites.addFolder",
+      (...args: unknown[]) => {
+        for (const uri of folderUris(args)) {
+          favorites.add(uri, true);
+        }
+      },
+    ),
+    vscode.commands.registerCommand("favorites.pickFolder", async () => {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: "Add to Favorites",
+        title: "Add folder to Favorites",
+      });
+      const folder = picked?.[0];
+      if (folder) {
+        favorites.add(folder, true);
+      }
+    }),
+    vscode.commands.registerCommand("stack.add", () => {
+      void stack.addBranch();
+    }),
+    vscode.commands.registerCommand("stack.unstack", () => {
+      void stack.unstack();
+    }),
+    vscode.commands.registerCommand("stack.refresh", () => stack.refresh()),
+    vscode.commands.registerCommand("branches.refresh", () =>
+      branches.refresh(),
+    ),
+    vscode.commands.registerCommand("branches.pare", () => {
+      void pareBranches(branchSwitch).finally(() => branches.refresh());
+    }),
+    vscode.commands.registerCommand("search2.refresh", () =>
+      searchPanel.refresh(),
+    ),
+    vscode.commands.registerCommand("search2.show", () =>
+      vscode.commands.executeCommand("search2.focus"),
+    ),
+    favorites.onDidChange(publishFavorite),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      publishFavorite();
+      publishActiveFile();
+    }),
+    vscode.window.tabGroups.onDidChangeTabs(() => {
+      publishFavorite();
+      publishActiveFile();
     }),
   );
 
@@ -222,68 +334,108 @@ export function activate(context: vscode.ExtensionContext): void {
     provider.commit();
   }
 
-  syncChrome();
-  updateBadge(provider.count);
-  if (isBranchMode(provider.contentMode)) {
-    void provider.ensureBranchLoaded();
+  publishLayouts();
+  publishFavorite();
+  publishActiveFile();
+  publishDiffBase();
+  void provider.ensureBranchLoaded();
+
+  function publishActiveFile(): void {
+    diffsPanel.setActiveFile(activeFileUri());
   }
 }
 
-function publishChrome(mode: ContentMode, layout: Layout): void {
-  void vscode.commands.executeCommand("setContext", CONTENT_MODE_KEY, mode);
-  void vscode.commands.executeCommand("setContext", LAYOUT_KEY, layout);
-  void vscode.commands.executeCommand(
-    "setContext",
-    BRANCH_MODE_KEY,
-    isBranchMode(mode),
-  );
+function activeFileUri(): string | undefined {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (
+    input instanceof vscode.TabInputTextDiff ||
+    input instanceof vscode.TabInputNotebookDiff
+  ) {
+    if (isTrackable(input.modified)) {
+      return input.modified.toString();
+    }
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (editor && isTrackable(editor.document.uri)) {
+    return editor.document.uri.toString();
+  }
+  if (
+    input instanceof vscode.TabInputText ||
+    input instanceof vscode.TabInputNotebook ||
+    input instanceof vscode.TabInputCustom
+  ) {
+    if (isTrackable(input.uri)) {
+      return input.uri.toString();
+    }
+  }
+  return undefined;
 }
 
-let pendingOpen:
-  | { key: string; uri: vscode.Uri; timer: ReturnType<typeof setTimeout> }
-  | undefined;
-
-function openDiffOrFile(uri: vscode.Uri): void {
-  const key = uri.toString();
-  if (pendingOpen?.key === key) {
-    clearTimeout(pendingOpen.timer);
-    pendingOpen = undefined;
-    void openFile(uri);
-    return;
-  }
-  if (pendingOpen) {
-    clearTimeout(pendingOpen.timer);
-    void openBranchDiff(pendingOpen.uri);
-  }
-  pendingOpen = {
-    key,
-    uri,
-    timer: setTimeout(() => {
-      const opening = pendingOpen;
-      pendingOpen = undefined;
-      if (opening) {
-        void openBranchDiff(opening.uri);
+function folderUris(args: unknown[]): vscode.Uri[] {
+  const found: vscode.Uri[] = [];
+  for (const arg of args) {
+    if (arg instanceof vscode.Uri) {
+      found.push(arg);
+    } else if (Array.isArray(arg)) {
+      for (const item of arg) {
+        if (item instanceof vscode.Uri) {
+          found.push(item);
+        }
       }
-    }, DOUBLE_CLICK_MS),
-  };
+    }
+  }
+  return found;
 }
 
 function openFile(uri: vscode.Uri): Thenable<unknown> {
   return vscode.commands.executeCommand("vscode.open", uri);
 }
 
-function contentLabel(mode: ContentMode): string {
-  if (mode === "branchOpen") {
-    return "Branch - Open";
+async function pickDiffCommit(provider: ActiveFilesProvider): Promise<void> {
+  let chain;
+  try {
+    chain = await listDiffChain(provider.rangeRef());
+  } catch {
+    void vscode.window.showErrorMessage(
+      "Couldn't list commits on this branch.",
+    );
+    return;
   }
-  if (mode === "branchDiff") {
-    return "Branch - Diff";
+  if (!chain) {
+    void vscode.window.showInformationMessage(
+      "Open a local git folder to choose a commit.",
+    );
+    return;
   }
-  return "Active";
+  const current = provider.pinnedCommitSha;
+  const items: Array<vscode.QuickPickItem & { sha?: string }> = [
+    {
+      label: current ? chain.label : `$(check) ${chain.label}`,
+      description: chain.baseSha.slice(0, 7),
+      detail: "Branch point",
+    },
+  ];
+  for (const commit of chain.commits) {
+    const selected = commit.sha.toLowerCase() === current;
+    items.push({
+      label: selected ? `$(check) ${commit.subject}` : commit.subject,
+      description: commit.head
+        ? `${commit.sha.slice(0, 7)} · HEAD`
+        : commit.sha.slice(0, 7),
+      sha: commit.sha.toLowerCase(),
+    });
+  }
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `Working tree compared with a commit since ${chain.label}`,
+    placeHolder: "Branch point, or a commit between it and HEAD",
+    matchOnDescription: true,
+  });
+  if (!picked) {
+    return;
+  }
+  await provider.useDiffCommit(picked.sha);
 }
 
-function layoutLabel(layout: Layout): string {
-  return layout === "tree" ? "Tree" : "List";
+export function deactivate(): void {
+  disposeCommandLog();
 }
-
-export function deactivate(): void {}
