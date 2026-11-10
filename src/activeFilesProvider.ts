@@ -146,6 +146,7 @@ export class ActiveFilesProvider
   private branchEntries: Tracked[] = [];
   private branchMessage: string | undefined;
   private branchBase = "main";
+  private branchBaseRef: string | undefined;
   private branchState: "loading" | "ready" = "ready";
   private branchGeneration = 0;
 
@@ -203,6 +204,13 @@ export class ActiveFilesProvider
 
   get branchBaseLabel(): string {
     return this.branchBase;
+  }
+
+  get branchComparison(): { ref: string; label: string } | undefined {
+    if (!this.branchBaseRef || this.pinnedCommit) {
+      return undefined;
+    }
+    return { ref: this.branchBaseRef, label: this.branchBase };
   }
 
   layoutMode(kind: PanelKind): Layout {
@@ -545,13 +553,11 @@ export class ActiveFilesProvider
         this.diffsLayout === "list" ? locationLabel(element.uri) : "";
       item.description = where || undefined;
       item.tooltip = branchTooltip(element.uri);
-      if (element.detail !== "deleted") {
-        item.command = {
-          command: "vscode.open",
-          title: "Open",
-          arguments: [element.uri],
-        };
-      }
+      item.command = {
+        command: "activeFiles.openDiff",
+        title: "Open Diff",
+        arguments: [element.uri],
+      };
       return item;
     }
 
@@ -683,6 +689,7 @@ export class ActiveFilesProvider
     }));
     this.branchMessage = snapshot.message;
     this.branchBase = snapshot.baseLabel;
+    this.branchBaseRef = snapshot.baseCommit;
     this.branchState = "ready";
     return true;
   }

@@ -272,7 +272,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("activeFiles.openDiff", (arg: unknown) => {
       const uri = arg instanceof vscode.Uri ? arg : uriFromCommandArgument(arg);
       if (uri) {
-        void openBranchDiff(uri, provider.rangeRef(), provider.pinnedCommitSha);
+        void openBranchDiff(
+          uri,
+          provider.rangeRef(),
+          provider.pinnedCommitSha,
+          provider.branchComparison,
+        );
       }
     }),
     vscode.commands.registerCommand("activeFiles.openFile", (arg: unknown) => {

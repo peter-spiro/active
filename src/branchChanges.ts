@@ -28,7 +28,13 @@ export type BranchSnapshot = {
   files: BranchFile[];
   message?: string;
   baseLabel: string;
+  baseCommit?: string;
   checkedOut?: boolean;
+};
+
+export type ResolvedBase = {
+  ref: string;
+  label: string;
 };
 
 export type DiffChainCommit = {
@@ -82,6 +88,7 @@ export async function collectBranchChanges(
   const files: BranchFile[] = [];
   const errors: string[] = [];
   const labels: string[] = [];
+  const bases: string[] = [];
   let notice: string | undefined;
   let repos = 0;
   for (const folder of folders) {
@@ -94,6 +101,9 @@ export async function collectBranchChanges(
       }
       repos += 1;
       labels.push(found.label);
+      if (found.ref) {
+        bases.push(found.ref);
+      }
       if (found.notice) {
         notice = found.notice;
       }
@@ -117,8 +127,10 @@ export async function collectBranchChanges(
 
   const seen = new Set<string>();
   const uniqueLabels = [...new Set(labels)];
+  const uniqueBases = [...new Set(bases)];
   return {
     baseLabel: uniqueLabels.length === 1 ? uniqueLabels[0] : "main",
+    baseCommit: uniqueBases.length === 1 ? uniqueBases[0] : undefined,
     message: notice,
     checkedOut: commit ? true : undefined,
     files: files.filter((file) => {
@@ -165,6 +177,7 @@ export async function openBranchDiff(
   file: vscode.Uri,
   baseRef?: string,
   commit?: string,
+  resolved?: ResolvedBase,
 ): Promise<void> {
   try {
     if (file.scheme !== "file") {
@@ -175,7 +188,7 @@ export async function openBranchDiff(
       await openCommitDiff(file, commit);
       return;
     }
-    const place = await locateBranchFile(file, baseRef);
+    const place = await locateBranchFile(file, baseRef, resolved);
     const name = path.basename(file.fsPath);
     const onDisk = await fileExists(file);
     if (onDisk && (await looksBinary(file))) {
@@ -253,7 +266,8 @@ async function changesInFolder(
   folder: vscode.WorkspaceFolder,
   baseRef?: string,
 ): Promise<
-  { files: BranchFile[]; label: string; notice?: string } | undefined
+  | { files: BranchFile[]; label: string; ref: string; notice?: string }
+  | undefined
 > {
   const cwd = folder.uri.fsPath;
   if (!(await isRepo(cwd))) {
@@ -300,14 +314,15 @@ async function changesInFolder(
     seen.add(key);
     files.push(local);
   }
-  return { label: base.label, files };
+  return { label: base.label, ref: base.ref, files };
 }
 
 async function commitFiles(
   folder: vscode.WorkspaceFolder,
   sha: string,
 ): Promise<
-  { files: BranchFile[]; label: string; notice?: string } | undefined
+  | { files: BranchFile[]; label: string; ref?: string; notice?: string }
+  | undefined
 > {
   const cwd = folder.uri.fsPath;
   if (!(await isRepo(cwd))) {
@@ -747,6 +762,7 @@ async function locateCommitFile(
 async function locateBranchFile(
   file: vscode.Uri,
   baseRef?: string,
+  resolved?: ResolvedBase,
 ): Promise<{
   repo: string;
   baseRelative: string;
@@ -758,7 +774,7 @@ async function locateBranchFile(
     throw new Error("This folder is not a git repository.");
   }
   const repo = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
-  const base = await comparisonPoint(repo, baseRef);
+  const base = resolved ?? (await comparisonPoint(repo, baseRef));
   const relative = gitRelative(repo, file.fsPath);
   const listed = await git(repo, [
     "diff",
