@@ -9,6 +9,9 @@ import {
   type PanelKind,
 } from "./activeFilesProvider";
 import {
+  checkoutBranchTip,
+  checkoutDiffCommit,
+  commitRefExists,
   listDiffChain,
   openBranchDiff,
   registerBranchDiffProvider,
@@ -28,6 +31,7 @@ const RECENT_LAYOUT_KEY = "activeFilesLayout";
 const DIFFS_LAYOUT_KEY = "diffsLayout";
 const DIFFS_STACK_PARENT_KEY = "diffs.hasStackParent";
 const DIFFS_BASE_KEY = "diffs.base";
+const DIFFS_VIEWING_COMMIT_KEY = "diffs.viewingCommit";
 const FAVORITE_ACTIVE_KEY = "favorites.active";
 const FAVORITE_CAN_ADD_KEY = "favorites.canAdd";
 
@@ -69,6 +73,11 @@ export function activate(context: vscode.ExtensionContext): void {
       "setContext",
       DIFFS_BASE_KEY,
       provider.diffBase,
+    );
+    void vscode.commands.executeCommand(
+      "setContext",
+      DIFFS_VIEWING_COMMIT_KEY,
+      provider.viewingCommit,
     );
   };
 
@@ -113,6 +122,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
+    provider.onDidChangeDiffMode(publishDiffBase),
     { dispose: disposeCommandLog },
     recentPanel,
     diffsPanel,
@@ -239,16 +249,30 @@ export function activate(context: vscode.ExtensionContext): void {
       selectDiffBase("main"),
     ),
     vscode.commands.registerCommand("diffs.pickCommit", () =>
-      pickDiffCommit(provider),
+      pickDiffCommit(provider, publishDiffBase),
+    ),
+    vscode.commands.registerCommand("diffs.returnToTip", () =>
+      leaveCommit(provider, publishDiffBase),
+    ),
+    vscode.commands.registerCommand("diffs.configureBase", () =>
+      configureCompareBranch(provider),
     ),
     stack.onDidChange(() => {
-      provider.setStackParent(stack.parentBranch());
+      const tip = provider.tipBranchName;
+      if (provider.viewingCommit && tip) {
+        const known = stack.levels.some((level) => level.name === tip);
+        if (known) {
+          provider.setStackParent(stack.parentOf(tip));
+        }
+      } else {
+        provider.setStackParent(stack.parentBranch());
+      }
       publishDiffBase();
     }),
     vscode.commands.registerCommand("activeFiles.openDiff", (arg: unknown) => {
       const uri = arg instanceof vscode.Uri ? arg : uriFromCommandArgument(arg);
       if (uri) {
-        void openBranchDiff(uri, provider.diffBaseRef());
+        void openBranchDiff(uri, provider.rangeRef(), provider.pinnedCommitSha);
       }
     }),
     vscode.commands.registerCommand("activeFiles.openFile", (arg: unknown) => {
@@ -391,10 +415,38 @@ function openFile(uri: vscode.Uri): Thenable<unknown> {
   return vscode.commands.executeCommand("vscode.open", uri);
 }
 
-async function pickDiffCommit(provider: ActiveFilesProvider): Promise<void> {
+async function configureCompareBranch(
+  provider: ActiveFilesProvider,
+): Promise<void> {
+  const current = provider.compareBranchName ?? "";
+  const entered = await vscode.window.showInputBox({
+    title: "Compare with branch",
+    prompt:
+      "Three-dot diff compares the working tree with this branch. Leave empty to use main.",
+    value: current,
+    ignoreFocusOut: true,
+  });
+  if (entered === undefined) {
+    return;
+  }
+  const name = entered.trim();
+  if (name === current) {
+    return;
+  }
+  if (name && !(await commitRefExists(name))) {
+    void vscode.window.showErrorMessage(`No branch named ${name}.`);
+    return;
+  }
+  await provider.setCompareBranch(name || undefined);
+}
+
+async function pickDiffCommit(
+  provider: ActiveFilesProvider,
+  publishDiffBase: () => void,
+): Promise<void> {
   let chain;
   try {
-    chain = await listDiffChain(provider.rangeRef());
+    chain = await listDiffChain(provider.rangeRef(), provider.tipBranchName);
   } catch {
     void vscode.window.showErrorMessage(
       "Couldn't list commits on this branch.",
@@ -408,32 +460,70 @@ async function pickDiffCommit(provider: ActiveFilesProvider): Promise<void> {
     return;
   }
   const current = provider.pinnedCommitSha;
-  const items: Array<vscode.QuickPickItem & { sha?: string }> = [
-    {
-      label: current ? chain.label : `$(check) ${chain.label}`,
-      description: chain.baseSha.slice(0, 7),
-      detail: "Branch point",
-    },
-  ];
+  const items: Array<vscode.QuickPickItem & { sha?: string }> = [];
   for (const commit of chain.commits) {
     const selected = commit.sha.toLowerCase() === current;
     items.push({
       label: selected ? `$(check) ${commit.subject}` : commit.subject,
       description: commit.head
-        ? `${commit.sha.slice(0, 7)} · HEAD`
+        ? `${commit.sha.slice(0, 7)} · tip`
         : commit.sha.slice(0, 7),
       sha: commit.sha.toLowerCase(),
     });
   }
+  items.push({
+    label: current ? chain.label : `$(check) ${chain.label}`,
+    description: chain.baseSha.slice(0, 7),
+    detail: "Branch point",
+  });
   const picked = await vscode.window.showQuickPick(items, {
-    title: `Working tree compared with a commit since ${chain.label}`,
-    placeHolder: "Branch point, or a commit between it and HEAD",
+    title: `Commits on ${chain.tipName}`,
+    placeHolder: "Check out a commit to see that commit's diff",
     matchOnDescription: true,
   });
   if (!picked) {
     return;
   }
-  await provider.useDiffCommit(picked.sha);
+  if (!picked.sha) {
+    await leaveCommit(provider, publishDiffBase);
+    return;
+  }
+  provider.holdBranchReload();
+  try {
+    const moved = await checkoutDiffCommit(picked.sha, provider.tipBranchName);
+    if ("error" in moved) {
+      void vscode.window.showErrorMessage(moved.error);
+      return;
+    }
+    await provider.showCommit(picked.sha, moved.tip);
+    publishDiffBase();
+  } finally {
+    provider.releaseBranchReload();
+  }
+}
+
+async function leaveCommit(
+  provider: ActiveFilesProvider,
+  publishDiffBase: () => void,
+): Promise<void> {
+  const tip = provider.tipBranchName;
+  if (!provider.viewingCommit && !tip) {
+    return;
+  }
+  provider.holdBranchReload();
+  try {
+    if (tip) {
+      const error = await checkoutBranchTip(tip);
+      if (error) {
+        void vscode.window.showErrorMessage(error);
+        return;
+      }
+    }
+    await provider.clearCommitView();
+    publishDiffBase();
+  } finally {
+    provider.releaseBranchReload();
+  }
 }
 
 export function deactivate(): void {

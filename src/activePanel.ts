@@ -277,7 +277,9 @@ function renderRows(
   if (rows.length === 0) {
     const text =
       kind === "diffs"
-        ? `No files differ from ${provider.branchBaseLabel} on this branch.`
+        ? provider.viewingCommit
+          ? `No files changed in ${provider.branchBaseLabel}.`
+          : `No files differ from ${provider.branchBaseLabel} on this branch.`
         : "Edit a file and it will show up here.";
     return `<div class="message">${escapeHtml(text)}</div>`;
   }

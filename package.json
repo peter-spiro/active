@@ -119,7 +119,7 @@
       },
       {
         "command": "diffs.levelOn",
-        "title": "Level diff",
+        "title": "Lower level branch",
         "category": "Active",
         "icon": {
           "light": "media/diff-level-on-light.svg",
@@ -128,7 +128,7 @@
       },
       {
         "command": "diffs.levelOff",
-        "title": "Level diff",
+        "title": "Lower level branch",
         "category": "Active",
         "icon": {
           "light": "media/diff-level-off-light.svg",
@@ -137,7 +137,7 @@
       },
       {
         "command": "diffs.mainOn",
-        "title": "Main diff",
+        "title": "Main branch",
         "category": "Active",
         "icon": {
           "light": "media/diff-main-on-light.svg",
@@ -146,7 +146,7 @@
       },
       {
         "command": "diffs.mainOff",
-        "title": "Main diff",
+        "title": "Main branch",
         "category": "Active",
         "icon": {
           "light": "media/diff-main-off-light.svg",
@@ -158,6 +158,18 @@
         "title": "Diff from commit",
         "category": "Active",
         "icon": "$(git-commit)"
+      },
+      {
+        "command": "diffs.returnToTip",
+        "title": "Return to branch tip",
+        "category": "Active",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "diffs.configureBase",
+        "title": "Compare branch",
+        "category": "Active",
+        "icon": "$(gear)"
       },
       {
         "command": "activeFiles.openDiff",
@@ -311,24 +323,34 @@
           "group": "navigation@2"
         },
         {
+          "command": "diffs.returnToTip",
+          "when": "view == diffFiles && diffs.viewingCommit",
+          "group": "navigation@3"
+        },
+        {
           "command": "diffs.showTree",
           "when": "view == diffFiles && diffsLayout == list",
-          "group": "navigation@3"
+          "group": "navigation@4"
         },
         {
           "command": "diffs.showList",
           "when": "view == diffFiles && diffsLayout == tree",
-          "group": "navigation@3"
+          "group": "navigation@4"
         },
         {
           "command": "diffs.refresh",
           "when": "view == diffFiles",
-          "group": "navigation@4"
+          "group": "navigation@5"
         },
         {
           "command": "diffs.collapseAll",
           "when": "view == diffFiles && diffsLayout == tree",
-          "group": "navigation@5"
+          "group": "navigation@6"
+        },
+        {
+          "command": "diffs.configureBase",
+          "when": "view == diffFiles",
+          "group": "navigation@7"
         },
         {
           "command": "activeFiles.showTree",
@@ -441,6 +463,18 @@
         },
         {
           "command": "diffs.mainOff",
+          "when": "false"
+        },
+        {
+          "command": "diffs.pickCommit",
+          "when": "false"
+        },
+        {
+          "command": "diffs.returnToTip",
+          "when": "false"
+        },
+        {
+          "command": "diffs.configureBase",
           "when": "false"
         },
         {

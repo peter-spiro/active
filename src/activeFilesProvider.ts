@@ -10,6 +10,8 @@ const DIFFS_FILTER_KEY = "diffs.filter";
 const DIFFS_LAYOUT_KEY = "diffs.layout";
 const DIFFS_BASE_KEY = "diffs.base";
 const DIFFS_COMMIT_KEY = "diffs.commit";
+const DIFFS_TIP_KEY = "diffs.tipBranch";
+const DIFFS_COMPARE_KEY = "diffs.compareBranch";
 const MAX_TRACKED = 500;
 const REFRESH_DELAY_MS = 300;
 const PERSIST_DELAY_MS = 500;
@@ -133,6 +135,9 @@ export class ActiveFilesProvider
   private diffsFilter = "";
   private diffFromParent = false;
   private pinnedCommit: string | undefined;
+  private tipBranch: string | undefined;
+  private compareBranch: string | undefined;
+  private holdingBranchReload = 0;
   private stackParent: string | undefined;
   private disposed = false;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -152,6 +157,9 @@ export class ActiveFilesProvider
   private readonly _onDidChangeCount = new vscode.EventEmitter<number>();
   readonly onDidChangeCount = this._onDidChangeCount.event;
 
+  private readonly _onDidChangeDiffMode = new vscode.EventEmitter<void>();
+  readonly onDidChangeDiffMode = this._onDidChangeDiffMode.event;
+
   constructor(
     private readonly workspaceState: vscode.Memento,
     private readonly globalState: vscode.Memento,
@@ -166,6 +174,8 @@ export class ActiveFilesProvider
     );
     this.diffFromParent = this.workspaceState.get(DIFFS_BASE_KEY) === "parent";
     this.pinnedCommit = readCommit(this.workspaceState.get(DIFFS_COMMIT_KEY));
+    this.tipBranch = readBranch(this.workspaceState.get(DIFFS_TIP_KEY));
+    this.compareBranch = readBranch(this.workspaceState.get(DIFFS_COMPARE_KEY));
     this.load();
   }
 
@@ -212,6 +222,7 @@ export class ActiveFilesProvider
     this.branchGeneration += 1;
     this._onDidChangeTreeData.dispose();
     this._onDidChangeCount.dispose();
+    this._onDidChangeDiffMode.dispose();
   }
 
   redraw(): void {
@@ -262,22 +273,39 @@ export class ActiveFilesProvider
     if (this.diffFromParent && this.stackParent) {
       return this.stackParent;
     }
-    return "main";
+    return this.compareBranch ?? "main";
   }
 
   rangeRef(): string | undefined {
     if (this.diffFromParent && this.stackParent) {
       return this.stackParent;
     }
-    return undefined;
+    return this.compareBranch;
   }
 
-  diffBaseRef(): string | undefined {
-    return this.pinnedCommit ?? this.rangeRef();
+  get compareBranchName(): string | undefined {
+    return this.compareBranch;
   }
 
   get pinnedCommitSha(): string | undefined {
     return this.pinnedCommit;
+  }
+
+  get tipBranchName(): string | undefined {
+    return this.tipBranch;
+  }
+
+  get viewingCommit(): boolean {
+    return this.pinnedCommit !== undefined;
+  }
+
+  holdBranchReload(): void {
+    this.holdingBranchReload += 1;
+    this.cancelBranchReload();
+  }
+
+  releaseBranchReload(): void {
+    this.holdingBranchReload = Math.max(0, this.holdingBranchReload - 1);
   }
 
   setStackParent(name: string | undefined): void {
@@ -285,30 +313,52 @@ export class ActiveFilesProvider
       return;
     }
     this.stackParent = name;
-    if (this.diffFromParent) {
+    if (this.diffFromParent && !this.pinnedCommit) {
       void this.reloadBranch();
+    }
+  }
+
+  async setCompareBranch(name: string | undefined): Promise<void> {
+    if (name === this.compareBranch) {
+      return;
+    }
+    this.compareBranch = name;
+    await this.workspaceState.update(DIFFS_COMPARE_KEY, name);
+    if (!this.diffFromParent && !this.pinnedCommit) {
+      await this.reloadBranch();
     }
   }
 
   async useDiffBase(mode: "main" | "parent"): Promise<void> {
     const next = mode === "parent";
-    if (next === this.diffFromParent && !this.pinnedCommit) {
+    if (next === this.diffFromParent) {
       return;
     }
     this.diffFromParent = next;
-    this.pinnedCommit = undefined;
     await this.workspaceState.update(DIFFS_BASE_KEY, mode);
-    await this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
+    if (!this.pinnedCommit) {
+      await this.reloadBranch();
+    }
+  }
+
+  async showCommit(sha: string, tip: string): Promise<void> {
+    this.pinnedCommit = sha.toLowerCase();
+    this.tipBranch = tip;
+    await this.workspaceState.update(DIFFS_COMMIT_KEY, this.pinnedCommit);
+    await this.workspaceState.update(DIFFS_TIP_KEY, tip);
+    this._onDidChangeDiffMode.fire();
     await this.reloadBranch();
   }
 
-  async useDiffCommit(sha: string | undefined): Promise<void> {
-    const next = sha?.toLowerCase();
-    if (next === this.pinnedCommit) {
+  async clearCommitView(): Promise<void> {
+    if (!this.pinnedCommit && !this.tipBranch) {
       return;
     }
-    this.pinnedCommit = next;
-    await this.workspaceState.update(DIFFS_COMMIT_KEY, next);
+    this.pinnedCommit = undefined;
+    this.tipBranch = undefined;
+    await this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
+    await this.workspaceState.update(DIFFS_TIP_KEY, undefined);
+    this._onDidChangeDiffMode.fire();
     await this.reloadBranch();
   }
 
@@ -327,7 +377,7 @@ export class ActiveFilesProvider
   }
 
   onBranchDirty(): void {
-    if (this.disposed) {
+    if (this.disposed || this.holdingBranchReload > 0) {
       return;
     }
     if (this.branchTimer) {
@@ -586,7 +636,9 @@ export class ActiveFilesProvider
         {
           kind: "message",
           id: "branch-loading",
-          label: `Comparing this branch with ${this.diffBaseLabel()}…`,
+          label: this.viewingCommit
+            ? `Showing commit ${this.diffBaseLabel()}…`
+            : `Comparing this branch with ${this.diffBaseLabel()}…`,
           icon: "loading",
         },
       ];
@@ -606,9 +658,23 @@ export class ActiveFilesProvider
 
   private async loadBranchChanges(): Promise<boolean> {
     const generation = ++this.branchGeneration;
-    const snapshot = await collectBranchChanges(this.diffBaseRef());
+    let snapshot = await collectBranchChanges(
+      this.rangeRef(),
+      this.pinnedCommit,
+    );
     if (generation !== this.branchGeneration || this.disposed) {
       return false;
+    }
+    if (snapshot.checkedOut === false && this.holdingBranchReload === 0) {
+      this.pinnedCommit = undefined;
+      this.tipBranch = undefined;
+      void this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
+      void this.workspaceState.update(DIFFS_TIP_KEY, undefined);
+      this._onDidChangeDiffMode.fire();
+      snapshot = await collectBranchChanges(this.rangeRef());
+      if (generation !== this.branchGeneration || this.disposed) {
+        return false;
+      }
     }
     this.branchEntries = snapshot.files.map((file) => ({
       uri: file.uri,
@@ -618,13 +684,6 @@ export class ActiveFilesProvider
     this.branchMessage = snapshot.message;
     this.branchBase = snapshot.baseLabel;
     this.branchState = "ready";
-    if (
-      this.pinnedCommit &&
-      snapshot.baseLabel !== this.pinnedCommit.slice(0, 7)
-    ) {
-      this.pinnedCommit = undefined;
-      void this.workspaceState.update(DIFFS_COMMIT_KEY, undefined);
-    }
     return true;
   }
 
@@ -739,6 +798,10 @@ function readCommit(value: unknown): string | undefined {
   return typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value)
     ? value.toLowerCase()
     : undefined;
+}
+
+function readBranch(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function isPersistedEntry(value: unknown): value is PersistedEntry {

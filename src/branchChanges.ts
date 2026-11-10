@@ -4,6 +4,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { branchSwitchBlock } from "./branchSwitch";
 import { commandFailure, logCommand } from "./commandLog";
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +28,7 @@ export type BranchSnapshot = {
   files: BranchFile[];
   message?: string;
   baseLabel: string;
+  checkedOut?: boolean;
 };
 
 export type DiffChainCommit = {
@@ -38,6 +40,7 @@ export type DiffChainCommit = {
 export type DiffChain = {
   label: string;
   baseSha: string;
+  tipName: string;
   commits: DiffChainCommit[];
 };
 
@@ -48,6 +51,7 @@ type Comparison = {
 
 export async function collectBranchChanges(
   baseRef?: string,
+  commit?: string,
 ): Promise<BranchSnapshot> {
   const folders =
     vscode.workspace.workspaceFolders?.filter(
@@ -61,18 +65,38 @@ export async function collectBranchChanges(
     };
   }
 
+  if (commit) {
+    const repo = await workspaceRepo();
+    const head = repo
+      ? (await git(repo, ["rev-parse", "HEAD"])).trim().toLowerCase()
+      : "";
+    if (head !== commit.toLowerCase()) {
+      return {
+        files: [],
+        baseLabel: commit.slice(0, 7),
+        checkedOut: false,
+      };
+    }
+  }
+
   const files: BranchFile[] = [];
   const errors: string[] = [];
   const labels: string[] = [];
+  let notice: string | undefined;
   let repos = 0;
   for (const folder of folders) {
     try {
-      const found = await changesInFolder(folder, baseRef);
+      const found = commit
+        ? await commitFiles(folder, commit)
+        : await changesInFolder(folder, baseRef);
       if (!found) {
         continue;
       }
       repos += 1;
       labels.push(found.label);
+      if (found.notice) {
+        notice = found.notice;
+      }
       files.push(...found.files);
     } catch (error) {
       errors.push(gitErrorMessage(error));
@@ -83,7 +107,8 @@ export async function collectBranchChanges(
     return {
       files: [],
       message: errors[0] ?? "This folder is not a git repository.",
-      baseLabel: "main",
+      baseLabel: commit ? commit.slice(0, 7) : "main",
+      checkedOut: commit ? true : undefined,
     };
   }
   if (errors.length > 0) {
@@ -94,6 +119,8 @@ export async function collectBranchChanges(
   const uniqueLabels = [...new Set(labels)];
   return {
     baseLabel: uniqueLabels.length === 1 ? uniqueLabels[0] : "main",
+    message: notice,
+    checkedOut: commit ? true : undefined,
     files: files.filter((file) => {
       const key = file.uri.toString();
       if (seen.has(key)) {
@@ -137,10 +164,15 @@ export function registerBranchDiffProvider(): vscode.Disposable {
 export async function openBranchDiff(
   file: vscode.Uri,
   baseRef?: string,
+  commit?: string,
 ): Promise<void> {
   try {
     if (file.scheme !== "file") {
       void vscode.window.showErrorMessage("Diff is available for local files.");
+      return;
+    }
+    if (commit) {
+      await openCommitDiff(file, commit);
       return;
     }
     const place = await locateBranchFile(file, baseRef);
@@ -220,7 +252,9 @@ export function watchBranchSignals(onDirty: () => void): vscode.Disposable {
 async function changesInFolder(
   folder: vscode.WorkspaceFolder,
   baseRef?: string,
-): Promise<{ files: BranchFile[]; label: string } | undefined> {
+): Promise<
+  { files: BranchFile[]; label: string; notice?: string } | undefined
+> {
   const cwd = folder.uri.fsPath;
   if (!(await isRepo(cwd))) {
     return undefined;
@@ -269,6 +303,45 @@ async function changesInFolder(
   return { label: base.label, files };
 }
 
+async function commitFiles(
+  folder: vscode.WorkspaceFolder,
+  sha: string,
+): Promise<
+  { files: BranchFile[]; label: string; notice?: string } | undefined
+> {
+  const cwd = folder.uri.fsPath;
+  if (!(await isRepo(cwd))) {
+    return undefined;
+  }
+  const topLevel = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+  const parent = `${sha}^`;
+  const label = sha.slice(0, 7);
+  if (!(await refExists(topLevel, parent))) {
+    return {
+      files: [],
+      label,
+      notice: "This commit has no parent.",
+    };
+  }
+  const diff = await git(topLevel, [
+    "diff",
+    "--name-status",
+    "--find-renames",
+    "-z",
+    parent,
+    sha,
+    "--",
+    cwd,
+  ]);
+  return {
+    label,
+    files: parseNameStatus(diff).map((change) => ({
+      uri: uriForChange(folder, topLevel, change.path),
+      detail: statusDetail(change.code),
+    })),
+  };
+}
+
 // local is kept in the list even when those files match main.
 async function localDocFiles(
   folder: vscode.WorkspaceFolder,
@@ -304,26 +377,25 @@ async function localDocFiles(
   return files;
 }
 
-// Commits after the active base (main, or the previous stack level) up to HEAD.
-// Newest first. The base itself is baseSha, not one of the commits.
+// Commits after the active base up to the branch tip. Newest first.
+// tipRef is the stack branch to keep using after that commit is checked out.
 export async function listDiffChain(
   baseRef?: string,
+  tipRef?: string,
 ): Promise<DiffChain | undefined> {
-  const folder = vscode.workspace.workspaceFolders?.find(
-    (item) => item.uri.scheme === "file",
-  );
-  if (!folder || !(await isRepo(folder.uri.fsPath))) {
+  const repo = await workspaceRepo();
+  if (!repo) {
     return undefined;
   }
-  const repo = (
-    await git(folder.uri.fsPath, ["rev-parse", "--show-toplevel"])
-  ).trim();
-  const base = await comparisonPoint(repo, baseRef);
-  const head = (await git(repo, ["rev-parse", "HEAD"])).trim();
+  const current = (await git(repo, ["branch", "--show-current"])).trim();
+  const tipName = tipRef || current;
+  const end = tipName && (await refExists(repo, tipName)) ? tipName : "HEAD";
+  const base = await comparisonPoint(repo, baseRef, end);
+  const tipSha = (await git(repo, ["rev-parse", end])).trim();
   const log = await git(repo, [
     "log",
     "--format=%H%x09%s",
-    `${base.ref}..HEAD`,
+    `${base.ref}..${end}`,
   ]);
   const commits: DiffChainCommit[] = [];
   for (const line of log.split("\n")) {
@@ -335,30 +407,120 @@ export async function listDiffChain(
     commits.push({
       sha,
       subject: tab < 0 ? sha.slice(0, 7) : line.slice(tab + 1),
-      head: sha === head,
+      head: sha === tipSha,
     });
   }
-  return { label: base.label, baseSha: base.ref, commits };
+  return {
+    label: base.label,
+    baseSha: base.ref,
+    tipName: tipName || "HEAD",
+    commits,
+  };
+}
+
+export async function checkoutDiffCommit(
+  sha: string,
+  savedTip?: string,
+): Promise<{ tip: string } | { error: string }> {
+  try {
+    const repo = await workspaceRepo();
+    if (!repo) {
+      return { error: "Open a local git folder to choose a commit." };
+    }
+    const blocked = await branchSwitchBlock(repo);
+    if (blocked) {
+      return { error: blocked };
+    }
+    if (await worktreeDirty(repo)) {
+      return {
+        error:
+          "Commit or discard uncommitted changes before checking out a commit.",
+      };
+    }
+    const branch = (await git(repo, ["branch", "--show-current"])).trim();
+    const head = (await git(repo, ["rev-parse", "HEAD"])).trim().toLowerCase();
+    const tip = branch || savedTip;
+    if (!tip) {
+      return {
+        error:
+          "This checkout is detached, so there is no branch tip to return to.",
+      };
+    }
+    if (head !== sha.toLowerCase() || branch) {
+      await git(repo, ["switch", "--detach", sha]);
+    }
+    return { tip };
+  } catch (error) {
+    return { error: gitErrorMessage(error) };
+  }
+}
+
+export async function checkoutBranchTip(
+  branch: string,
+): Promise<string | undefined> {
+  try {
+    const repo = await workspaceRepo();
+    if (!repo) {
+      return "Open a local git folder to return to the branch tip.";
+    }
+    const blocked = await branchSwitchBlock(repo);
+    if (blocked) {
+      return blocked;
+    }
+    if (await worktreeDirty(repo)) {
+      return "Commit or discard uncommitted changes before returning to the branch tip.";
+    }
+    const current = (await git(repo, ["branch", "--show-current"])).trim();
+    if (current !== branch) {
+      await git(repo, ["switch", "--no-guess", branch]);
+    }
+    return undefined;
+  } catch (error) {
+    return gitErrorMessage(error);
+  }
 }
 
 // A named baseRef is the previous stack level. A commit id is that commit.
-// Otherwise the base is main. The comparison commit is merge-base(base, HEAD),
-// the same point as `git diff <base>...HEAD`, compared with the working tree.
+// Otherwise the base is main. head is the branch tip, including while a
+// commit from a stack branch is checked out. The comparison commit is
+// merge-base(base, head), the same point as `git diff <base>...head`.
 async function comparisonPoint(
   repo: string,
   baseRef?: string,
+  head = "HEAD",
 ): Promise<Comparison> {
   if (baseRef && (await refExists(repo, baseRef))) {
     try {
-      const ref = (await git(repo, ["merge-base", "HEAD", baseRef])).trim();
+      const ref = (await git(repo, ["merge-base", head, baseRef])).trim();
       return { ref, label: comparisonLabel(baseRef, ref) };
     } catch {
       // The previous level is not an ancestor we can compare. Fall back to main.
     }
   }
   const mainRef = await resolveBaseRef(repo);
-  const ref = (await git(repo, ["merge-base", "HEAD", mainRef])).trim();
+  const ref = (await git(repo, ["merge-base", head, mainRef])).trim();
   return { ref, label: "main" };
+}
+
+async function workspaceRepo(): Promise<string | undefined> {
+  const folder = vscode.workspace.workspaceFolders?.find(
+    (item) => item.uri.scheme === "file",
+  );
+  if (!folder || !(await isRepo(folder.uri.fsPath))) {
+    return undefined;
+  }
+  return (
+    await git(folder.uri.fsPath, ["rev-parse", "--show-toplevel"])
+  ).trim();
+}
+
+async function worktreeDirty(repo: string): Promise<boolean> {
+  const status = await git(repo, [
+    "status",
+    "--porcelain",
+    "--untracked-files=normal",
+  ]);
+  return status.trim().length > 0;
 }
 
 async function isRepo(cwd: string): Promise<boolean> {
@@ -403,6 +565,14 @@ async function resolveBaseRef(cwd: string): Promise<string> {
 
 function comparisonLabel(baseRef: string, resolved: string): string {
   return /^[0-9a-f]{7,40}$/i.test(baseRef) ? resolved.slice(0, 7) : baseRef;
+}
+
+export async function commitRefExists(ref: string): Promise<boolean> {
+  const repo = await workspaceRepo();
+  if (!repo) {
+    return false;
+  }
+  return refExists(repo, ref);
 }
 
 async function refExists(cwd: string, ref: string): Promise<boolean> {
@@ -501,6 +671,77 @@ function existingPath(value: string): string {
   } catch {
     return value;
   }
+}
+
+async function openCommitDiff(file: vscode.Uri, sha: string): Promise<void> {
+  const name = path.basename(file.fsPath);
+  const place = await locateCommitFile(file, sha);
+  const parent = `${sha}^`;
+  const leftBytes = place.added
+    ? undefined
+    : await readBaseBytes(place.repo, parent, place.leftRelative);
+  const rightBytes = place.deleted
+    ? undefined
+    : await readBaseBytes(place.repo, sha, place.rightRelative);
+  if (leftBytes?.includes(0) || rightBytes?.includes(0)) {
+    void vscode.window.showInformationMessage(
+      `${name} is binary, so there is no text diff.`,
+    );
+    return;
+  }
+  const title = `${name} (${sha.slice(0, 7)})`;
+  const left = diffUri(file, {
+    repo: place.repo,
+    ref: parent,
+    relative: place.leftRelative,
+    empty: !leftBytes,
+  });
+  const right = diffUri(file, {
+    repo: place.repo,
+    ref: sha,
+    relative: place.rightRelative,
+    empty: !rightBytes,
+  });
+  await vscode.commands.executeCommand("vscode.diff", left, right, title);
+}
+
+async function locateCommitFile(
+  file: vscode.Uri,
+  sha: string,
+): Promise<{
+  repo: string;
+  leftRelative: string;
+  rightRelative: string;
+  added: boolean;
+  deleted: boolean;
+}> {
+  const dir = path.dirname(file.fsPath);
+  if (!(await isRepo(dir))) {
+    throw new Error("This folder is not a git repository.");
+  }
+  const repo = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
+  const relative = gitRelative(repo, file.fsPath);
+  const listed = await git(repo, [
+    "diff",
+    "--name-status",
+    "--find-renames",
+    "-z",
+    `${sha}^`,
+    sha,
+    "--",
+    file.fsPath,
+  ]);
+  const match = parseNameStatus(listed).find(
+    (change) => change.path === relative || change.previous === relative,
+  );
+  const rightRelative = match?.path ?? relative;
+  return {
+    repo,
+    leftRelative: match?.previous ?? rightRelative,
+    rightRelative,
+    added: match?.code === "A",
+    deleted: match?.code === "D",
+  };
 }
 
 async function locateBranchFile(

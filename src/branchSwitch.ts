@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { commandFailure, logCommand } from "./commandLog";
@@ -40,6 +42,11 @@ export class BranchSwitch {
     }
     this.switching = true;
     try {
+      const blocked = await branchSwitchBlock(root);
+      if (blocked) {
+        void vscode.window.showErrorMessage(blocked);
+        return;
+      }
       if (await hasUncommittedChanges(root)) {
         const current = (
           await run("git", ["branch", "--show-current"], root)
@@ -216,6 +223,44 @@ function isParkNote(value: unknown): value is ParkNote {
     typeof note.branch === "string" &&
     typeof note.sha === "string"
   );
+}
+
+export async function branchSwitchBlock(
+  root: string,
+): Promise<string | undefined> {
+  if (
+    (await gitPathExists(root, "rebase-merge")) ||
+    (await gitPathExists(root, "rebase-apply"))
+  ) {
+    return "A rebase is in progress. Finish or abort it before switching branches.";
+  }
+  if (await verifyRef(root, "MERGE_HEAD")) {
+    return "A merge is in progress. Finish or abort it before switching branches.";
+  }
+  const unmerged = await run("git", ["ls-files", "--unmerged"], root);
+  if (unmerged.trim().length > 0) {
+    return "This branch has merge conflicts. Resolve them before switching branches.";
+  }
+  return undefined;
+}
+
+async function gitPathExists(root: string, name: string): Promise<boolean> {
+  const relative = (
+    await run("git", ["rev-parse", "--git-path", name], root)
+  ).trim();
+  const absolute = path.isAbsolute(relative)
+    ? relative
+    : path.join(root, relative);
+  return existsSync(absolute);
+}
+
+async function verifyRef(root: string, ref: string): Promise<boolean> {
+  try {
+    await run("git", ["rev-parse", "--verify", "--quiet", ref], root);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function hasUncommittedChanges(root: string): Promise<boolean> {

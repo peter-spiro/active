@@ -74,8 +74,15 @@ export class StackList implements vscode.Disposable {
   }
 
   parentBranch(): string | undefined {
+    const current = this.levelsInternal.find(
+      (level) => level.current && !level.trunk,
+    );
+    return current ? this.parentOf(current.name) : undefined;
+  }
+
+  parentOf(branch: string): string | undefined {
     const branches = this.levelsInternal.filter((level) => !level.trunk);
-    const index = branches.findIndex((level) => level.current);
+    const index = branches.findIndex((level) => level.name === branch);
     if (index < 0 || index + 1 >= branches.length) {
       return undefined;
     }
